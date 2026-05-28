@@ -22,6 +22,25 @@
 
 #include <cstdlib>
 
+// Thread-local storage for efld()/hsfld()/hintg() scratch outputs.
+// See declaration in nec_context.h for rationale.
+thread_local nec_complex nec_context::exk;
+thread_local nec_complex nec_context::eyk;
+thread_local nec_complex nec_context::ezk;
+thread_local nec_complex nec_context::exs;
+thread_local nec_complex nec_context::eys;
+thread_local nec_complex nec_context::ezs;
+thread_local nec_complex nec_context::exc;
+thread_local nec_complex nec_context::eyc;
+thread_local nec_complex nec_context::ezc;
+
+// gf()/gh() scratch state written by eksc()/ekscx() and hsfld() helpers.
+thread_local int nec_context::ija;
+thread_local nec_float nec_context::zpk;
+thread_local nec_float nec_context::rkb2;
+thread_local nec_float nec_context::zpka;
+thread_local nec_float nec_context::rhks;
+
 nec_context::nec_context() : fnorm(0,0), current_vector(0) {
   m_output_fp=NULL;
   m_geometry = new c_geometry();
@@ -2051,41 +2070,67 @@ void nec_context::cmset( int64_t nrow, complex_array& in_cm, nec_float rkhx) {
 
   ASSERT(in2 == std::min(nlast, np));
   
-  /* wire source loop */
-  for( int j = 1; j <= m_geometry->n_segments; j++ ) {
-    m_geometry->trio(j);
-    
-    for (int i = 0; i < m_geometry->jsno; i++ ) {
-      int ij = m_geometry->jco[i];
-      m_geometry->jco[i] = ((ij-1)/ np)* mp2+ij;
-    }
+  /* wire source loop.
+   *
+   * Wrapped in `#pragma omp parallel` so the thread team is spawned ONCE
+   * across the whole source loop instead of fork/joining per source.
+   * The per-source serial portions (trio(), jco mutation, the matrix
+   * loading modification) run inside `#pragma omp single` — only one
+   * thread executes them while the others wait at the implicit barrier.
+   * cmww() then uses orphaned `#pragma omp for` to distribute observers
+   * across the existing team without further fork/joins.
+   *
+   * Most of the per-source cost is in cmww()'s observer loop (Green's
+   * function evaluations), so the single-threaded serial portions are
+   * negligible relative to that. The win is eliminating ~N_segments
+   * fork/joins. */
+#pragma omp parallel default(shared)
+  {
+    for( int j = 1; j <= m_geometry->n_segments; j++ ) {
+#pragma omp single
+      {
+        m_geometry->trio(j);
 
-    if ( i1 <= in2)
-      cmww( j, i1, in2, in_cm, nrow, in_cm, nrow,1);
+        for (int i = 0; i < m_geometry->jsno; i++ ) {
+          int ij = m_geometry->jco[i];
+          m_geometry->jco[i] = ((ij-1)/ np)* mp2+ij;
+        }
+      }
+      /* implicit barrier here — all threads now see trio outputs */
 
-    if ( im1 <= im2) {
-      complex_array temp = in_cm.segment((ist-1)*nrow, in_cm.size() - ((ist-1)*nrow));
-      cmws( j, im1, im2, temp, nrow, in_cm, nrow, 1);
-      /* CMWS (J,IM1,IM2,CM(1,IST),NROW,CM,NROW,1) */
-    }
-    /* matrix elements modified by loading */
-    if ( nload == 0)
-      continue;
+      if ( i1 <= in2)
+        cmww( j, i1, in2, in_cm, nrow, in_cm, nrow,1);
 
-    if ( j > np)
-      continue;
+      if ( im1 <= im2) {
+#pragma omp single
+        {
+          complex_array temp = in_cm.segment((ist-1)*nrow, in_cm.size() - ((ist-1)*nrow));
+          cmws( j, im1, im2, temp, nrow, in_cm, nrow, 1);
+          /* CMWS (J,IM1,IM2,CM(1,IST),NROW,CM,NROW,1) */
+        }
+      }
+      /* matrix elements modified by loading */
+      if ( nload == 0)
+        continue;
 
-    int ipr = j;
-    if ( (ipr < 1) || (ipr > it) )
-      continue;
+      if ( j > np)
+        continue;
 
-    nec_complex zaj= zarray[j-1];
+      int ipr = j;
+      if ( (ipr < 1) || (ipr > it) )
+        continue;
 
-    for (int i = 0; i < m_geometry->jsno; i++ ) {
-      int64_t jss = m_geometry->jco[i];
-      in_cm[(jss-1)+(ipr-1)*nrow] -= ( m_geometry->ax[i]+ m_geometry->cx[i])* zaj;
-    }
-  } /* for( j = 1; j <= n; j++ ) */
+#pragma omp single
+      {
+        nec_complex zaj= zarray[j-1];
+
+        for (int i = 0; i < m_geometry->jsno; i++ ) {
+          int64_t jss = m_geometry->jco[i];
+          in_cm[(jss-1)+(ipr-1)*nrow] -= ( m_geometry->ax[i]+ m_geometry->cx[i])* zaj;
+        }
+      }
+    } /* for( j = 1; j <= n; j++ ) */
+  } /* omp parallel */
   
   int m = m_geometry->m;
   if ( m != 0)  {
@@ -2463,10 +2508,23 @@ void nec_context::cmww( int j, int i1, int i2, complex_array& in_cm,
   int i, jx;
   nec_float xi, yi, zi, ai, cabi, sabi, salpi;
   nec_complex etk, ets, etc;
-  
-  /* set source segment parameters */
+
+  /* Decrement j on every thread so the `i != j` check later in the
+   * observer loop sees the same value. Only the single-thread block
+   * below writes the nec_context members, so all threads must agree on
+   * j's value to read those writes consistently. */
   jx = j;
   j--;
+
+  /* Per-source prologue — runs once per cmww() invocation, on one thread.
+   * Writes nec_context members m_s, m_b, xj..salpj and (under m_use_exk)
+   * ind1, ind2. The implicit barrier at end of `omp single` makes those
+   * writes visible to every thread before the observer loop reads them.
+   * If we don't wrap this in `omp single`, all team threads execute the
+   * prologue redundantly and thrash the cache lines holding those
+   * members. */
+#pragma omp single
+  {
   m_s= m_geometry->segment_length[j];
   m_b= m_geometry->segment_radius[j];
   xj= m_geometry->x[j];
@@ -2475,7 +2533,7 @@ void nec_context::cmww( int j, int i1, int i2, complex_array& in_cm,
   cabj= m_geometry->cab[j];
   sabj= m_geometry->sab[j];
   salpj= m_geometry->salp[j];
-  
+
   /* Decide whether ext. t.w. approx. can be used */
   if ( m_use_exk == true) {
     int ipr = m_geometry->icon1[j];
@@ -2544,11 +2602,24 @@ void nec_context::cmww( int j, int i1, int i2, complex_array& in_cm,
       }
     } /* if ( ipr < 0 ) */
   } /* if ( m_use_exk == true) */
-  
-  /* observation loop */
-  int ipr = -1;
-  for( i = i1-1; i < i2; i++ ) {
-    ipr++;
+  } /* omp single — implicit barrier publishes the prologue writes */
+
+  /* observation loop — orphaned worksharing: when cmset() wraps its
+   * source loop in `#pragma omp parallel`, this `omp for` distributes
+   * observers across the existing thread team without a fork/join. When
+   * cmset() is single-threaded (or this is called from a different path),
+   * an orphaned `omp for` outside a parallel region runs serially.
+   *
+   * Each iteration writes to its own row (normal fill, in_cm[ipr+_x*nr])
+   * or column (transposed fill, in_cm[_x+ipr*nr]) indexed by `ipr`. Two
+   * iterations never alias because ipr differs. The efld() outputs
+   * (exk..ezc) are static thread_local, so per-thread scratch is private.
+   * The reads from m_geometry->jco/ax/bx/cx are read-only across
+   * iterations. */
+#pragma omp for schedule(static) \
+        private(xi, yi, zi, ai, cabi, sabi, salpi, etk, ets, etc)
+  for( int i = i1-1; i < i2; i++ ) {
+    int ipr = i - (i1 - 1);
     xi= m_geometry->x[i];
     yi= m_geometry->y[i];
     zi= m_geometry->z[i];

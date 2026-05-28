@@ -850,7 +850,14 @@ public:
   nec_float m_s, m_b, xj, yj, zj, cabj, sabj, salpj;
   nec_float rkh; /* matrix integration limit */
   nec_float t1xj, t1yj, t1zj, t2xj, t2yj, t2zj;
-  nec_complex  exk, eyk, ezk, exs, eys, ezs, exc, eyc, ezc;
+  /* exk..ezc are scratch outputs of efld()/hsfld()/hintg(). They are
+   * static thread_local so the observer loop inside cmww() can be
+   * parallelized: each OpenMP thread gets its own copy. The matrix-fill
+   * pipeline always pairs an efld()/hsfld()/hintg() call with the
+   * subsequent reads, so per-thread scope is enough. (Cost: all
+   * nec_context instances share these slots — acceptable since we never
+   * run multiple simulations concurrently from one thread.) */
+  static thread_local nec_complex  exk, eyk, ezk, exs, eys, ezs, exc, eyc, ezc;
   
   /* common  /smat/ */
   int nop; /* My addition */
@@ -860,12 +867,14 @@ public:
   int isnor;
   nec_float xo, yo, zo, sn, xsn, ysn;
   
-  /* common  /tmi/ */
-  int ija; /* changed to ija to avoid conflict */
-  nec_float zpk, rkb2;
-  
-  /*common  /tmh/ */
-  nec_float zpka, rhks;
+  /* common  /tmi/ — gf() scratch state written by eksc()/ekscx().
+   * thread_local so concurrent threads in the cmww observer loop don't
+   * stomp on each other through the efld() -> eksc() -> gf() chain. */
+  static thread_local int ija; /* changed to ija to avoid conflict */
+  static thread_local nec_float zpk, rkb2;
+
+  /*common  /tmh/ — similar gh() scratch state. */
+  static thread_local nec_float zpka, rhks;
 
   
   // some auxiliary functions to be made private once
