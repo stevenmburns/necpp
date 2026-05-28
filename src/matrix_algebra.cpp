@@ -405,10 +405,24 @@ void solve_ge( int64_t n, complex_array& a, int_array& ip,
 
 #if LAPACK
 
+#if LAPACKE
+// Make LAPACKE prototypes accept std::complex<double>* / std::complex<float>*
+// directly; the storage layout is identical to C99 _Complex (and to MKL's
+// MKL_Complex16) on every platform we care about, so this is a clean
+// cast-free interface.
+#define lapack_complex_double std::complex<double>
+#define lapack_complex_float  std::complex<float>
+#ifdef USE_MKL
+#include <mkl_lapacke.h>
+#else
+#include <lapacke.h>
+#endif
+#else
 extern "C"
 {
 #include <clapack.h>
 }
+#endif
 
 
 
@@ -478,8 +492,14 @@ void lu_decompose_lapack(nec_output_file& s_output,    int64_t n, complex_array&
     *                                singular, and division by zero will occur if it is used
     *                                to solve a system of equations.
     */
-    int32_t info = clapack_zgetrf (CblasColMajor, int32_t(n), int32_t(n), 
+#if LAPACKE
+    lapack_int info = LAPACKE_zgetrf(LAPACK_COL_MAJOR,
+                    lapack_int(n), lapack_int(n),
+                    a_in.data(), lapack_int(ndim), ip.data());
+#else
+    int32_t info = clapack_zgetrf (CblasColMajor, int32_t(n), int32_t(n),
                     (void*) a_in.data(), int32_t(ndim), ip.data());
+#endif
     
     if (0 != info) {
         /*
@@ -510,8 +530,14 @@ void solve_lapack( int64_t n, complex_array& a, int_array& ip,
 {
     DEBUG_TRACE("solve_lapack(" << n << "," << ndim << ")");
 
-    int info = clapack_zgetrs (CblasColMajor, CblasNoTrans, 
+#if LAPACKE
+    lapack_int info = LAPACKE_zgetrs(LAPACK_COL_MAJOR, 'N',
+        lapack_int(n), 1, a.data(), lapack_int(ndim), ip.data(),
+        b.data(), lapack_int(n));
+#else
+    int info = clapack_zgetrs (CblasColMajor, CblasNoTrans,
         static_cast<int>(n), 1, (void*) a.data(), static_cast<int>(ndim), ip.data(), b.data(), static_cast<int>(n));
+#endif
     
     if (0 != info) {
         /*
