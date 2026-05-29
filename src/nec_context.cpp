@@ -2129,21 +2129,21 @@ void nec_context::cmset( int64_t nrow, complex_array& in_cm, nec_float rkhx) {
    *
    *   Phase 3 (parallel over sources): the matrix-loading modification
    *   writes one column per source, so parallelizing over j is safe. */
-  struct cmww_source_data {
-    nec_float m_s, m_b;
-    nec_float xj, yj, zj;
-    nec_float cabj, sabj, salpj;
-    int ind1, ind2;
-    int jsno;
-    std::vector<int> jco;
-    std::vector<nec_float> ax, bx, cx;
-  };
-
   if ( i1 <= in2 ) {
     /* Phase 1: precompute. trio() writes its outputs to m_geometry
-     * scratch arrays; we copy them out per source before moving on. */
+     * scratch arrays; we copy them out per source before moving on.
+     *
+     * The source-data table is a class member (m_cmset_source_data) so
+     * its storage — and the storage of the per-entry jco/ax/bx/cx
+     * vectors — is reused across cmset() calls. .resize() preserves
+     * capacity, so subsequent calls with the same or fewer segments do
+     * no allocation. vtune showed operator new + free + memset at ~7%
+     * of CPU time before this hoist. */
     const int n_segs = m_geometry->n_segments;
-    std::vector<cmww_source_data> source_data(n_segs + 1);
+    std::vector<cmww_source_data>& source_data = m_cmset_source_data;
+    if (static_cast<int>(source_data.size()) < n_segs + 1) {
+      source_data.resize(n_segs + 1);
+    }
 
     for ( int j = 1; j <= n_segs; j++ ) {
       m_geometry->trio(j);

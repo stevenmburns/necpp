@@ -20,6 +20,8 @@
   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
+#include <vector>
+
 #include "common.h"
 #include "c_ggrid.h"
 #include "math_util.h"
@@ -909,6 +911,26 @@ public:
   
 
 private:
+
+  /*! \brief Per-source precomputed data used by cmset()'s gather-then-scatter
+   * matrix fill. One entry per source segment, captured serially during
+   * Phase 1 and read in parallel during Phase 2.
+   *
+   * The inner vectors (jco/ax/bx/cx) hold trio() output for the segments
+   * connected to source j; their size is jsno (typically 1-5). We hoist
+   * the whole table to a member so the per-call vector<>::resize() reuses
+   * the previously-allocated capacity instead of going to malloc on every
+   * cmset() call. */
+  struct cmww_source_data {
+    nec_float m_s, m_b;
+    nec_float xj, yj, zj;
+    nec_float cabj, sabj, salpj;
+    int ind1, ind2;
+    int jsno;
+    std::vector<int> jco;
+    std::vector<nec_float> ax, bx, cx;
+  };
+  std::vector<cmww_source_data> m_cmset_source_data;
 
   /*! \brief A private convenience function called by ne_card() and nh_card()
   */
