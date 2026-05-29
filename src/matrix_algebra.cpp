@@ -493,7 +493,11 @@ void lu_decompose_lapack(nec_output_file& s_output,    int64_t n, complex_array&
     *                                to solve a system of equations.
     */
 #if LAPACKE
-    lapack_int info = LAPACKE_zgetrf(LAPACK_COL_MAJOR,
+    /* _work variant skips LAPACKE's input-validation pass (NaN-check
+     * across all 2*n^2 doubles), which vtune showed at ~20% of LLC
+     * misses on this fill+solve workload. We construct the input matrix
+     * ourselves and trust it. */
+    lapack_int info = LAPACKE_zgetrf_work(LAPACK_COL_MAJOR,
                     lapack_int(n), lapack_int(n),
                     a_in.data(), lapack_int(ndim), ip.data());
 #else
@@ -531,7 +535,9 @@ void solve_lapack( int64_t n, complex_array& a, int_array& ip,
     DEBUG_TRACE("solve_lapack(" << n << "," << ndim << ")");
 
 #if LAPACKE
-    lapack_int info = LAPACKE_zgetrs(LAPACK_COL_MAJOR, 'N',
+    /* _work variant skips LAPACKE's input-validation pass. See
+     * lu_decompose_lapack above for rationale. */
+    lapack_int info = LAPACKE_zgetrs_work(LAPACK_COL_MAJOR, 'N',
         lapack_int(n), 1, a.data(), lapack_int(ndim), ip.data(),
         b.data(), lapack_int(n));
 #else
