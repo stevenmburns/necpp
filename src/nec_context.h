@@ -844,12 +844,27 @@ public:
   
   
   /* common  /dataj/ */
-  int ind1, indd1, ind2, indd2;
+  /* ind1/ind2 are per-source flags set by cmww()'s prologue and read by
+   * efld() in the observer loop. Same thread-local rationale as
+   * m_s/xj/etc. above. indd1/indd2 are unused (kept for ABI). */
+  static thread_local int ind1, ind2;
+  int indd1, indd2;
   bool m_use_exk; /* Was iexk */
   
-  nec_float m_s, m_b, xj, yj, zj, cabj, sabj, salpj;
-  nec_float rkh; /* matrix integration limit */
-  nec_float t1xj, t1yj, t1zj, t2xj, t2yj, t2zj;
+  /* Per-source state read by efld()/hsfld()/hintg() and written by
+   * cmww()/cmws() prologues. In the gather-then-scatter matrix fill,
+   * each thread iterates over ALL sources for its observers; the
+   * thread must re-set these per source j. Making them static
+   * thread_local lets the parallel observer loop work without
+   * serializing on a shared prologue.
+   *
+   * Cost: nec_context instances in the same thread share these slots —
+   * fine in practice since we never run multiple simulations
+   * concurrently from one thread. */
+  static thread_local nec_float m_s, m_b, xj, yj, zj, cabj, sabj, salpj;
+  nec_float rkh; /* matrix integration limit, only set once per cmset() */
+  /* Patch (surface) prologue scratch used by compute_matrix_ss(). */
+  static thread_local nec_float t1xj, t1yj, t1zj, t2xj, t2yj, t2zj;
   /* exk..ezc are scratch outputs of efld()/hsfld()/hintg(). They are
    * static thread_local so the observer loop inside cmww() can be
    * parallelized: each OpenMP thread gets its own copy. The matrix-fill

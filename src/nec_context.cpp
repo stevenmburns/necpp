@@ -20,7 +20,10 @@
 #include "c_geometry.h"
 #include "nec_exception.h"
 
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 // Thread-local storage for efld()/hsfld()/hintg() scratch outputs.
 // See declaration in nec_context.h for rationale.
@@ -40,6 +43,24 @@ thread_local nec_float nec_context::zpk;
 thread_local nec_float nec_context::rkb2;
 thread_local nec_float nec_context::zpka;
 thread_local nec_float nec_context::rhks;
+
+// Per-source state — set by cmww()/cmws() prologues, read by efld() etc.
+thread_local nec_float nec_context::m_s;
+thread_local nec_float nec_context::m_b;
+thread_local nec_float nec_context::xj;
+thread_local nec_float nec_context::yj;
+thread_local nec_float nec_context::zj;
+thread_local nec_float nec_context::cabj;
+thread_local nec_float nec_context::sabj;
+thread_local nec_float nec_context::salpj;
+thread_local nec_float nec_context::t1xj;
+thread_local nec_float nec_context::t1yj;
+thread_local nec_float nec_context::t1zj;
+thread_local nec_float nec_context::t2xj;
+thread_local nec_float nec_context::t2yj;
+thread_local nec_float nec_context::t2zj;
+thread_local int nec_context::ind1;
+thread_local int nec_context::ind2;
 
 nec_context::nec_context() : fnorm(0,0), current_vector(0) {
   m_output_fp=NULL;
@@ -2069,68 +2090,202 @@ void nec_context::cmset( int64_t nrow, complex_array& in_cm, nec_float rkhx) {
     ist= np- i1+2;
 
   ASSERT(in2 == std::min(nlast, np));
-  
-  /* wire source loop.
+
+  /* Gather-then-scatter matrix fill.
    *
-   * Wrapped in `#pragma omp parallel` so the thread team is spawned ONCE
-   * across the whole source loop instead of fork/joining per source.
-   * The per-source serial portions (trio(), jco mutation, the matrix
-   * loading modification) run inside `#pragma omp single` — only one
-   * thread executes them while the others wait at the implicit barrier.
-   * cmww() then uses orphaned `#pragma omp for` to distribute observers
-   * across the existing team without further fork/joins.
+   * The original loop nest is (source j) outer, (observer i) inner. Each
+   * source contributes to multiple (jco[ij]-1, ipr) cells, so different
+   * sources can write to the same cell — a write race that blocks
+   * source-loop parallelism. We instead invert to (observer ipr) outer,
+   * (source j) inner. Now each ipr column is fully owned by one thread:
+   * writes are L1-resident (~34 KB/column) and there is no inter-thread
+   * race.
    *
-   * Most of the per-source cost is in cmww()'s observer loop (Green's
-   * function evaluations), so the single-threaded serial portions are
-   * negligible relative to that. The win is eliminating ~N_segments
-   * fork/joins. */
-#pragma omp parallel default(shared)
-  {
-    for( int j = 1; j <= m_geometry->n_segments; j++ ) {
-#pragma omp single
-      {
-        m_geometry->trio(j);
+   *   Phase 1 (serial, cheap): trio() each source, capture jsno/jco/ax/
+   *   bx/cx plus cmww()'s prologue outputs (m_s, m_b, xj..salpj, ind1,
+   *   ind2) into per-source data.
+   *
+   *   Phase 2 (parallel over columns): for each observer ipr, iterate
+   *   all sources j; set the thread-local per-source state from the
+   *   precomputed table, call efld(), accumulate into in_cm[_,ipr].
+   *
+   *   Phase 3 (parallel over sources): the matrix-loading modification
+   *   writes one column per source, so parallelizing over j is safe. */
+  struct cmww_source_data {
+    nec_float m_s, m_b;
+    nec_float xj, yj, zj;
+    nec_float cabj, sabj, salpj;
+    int ind1, ind2;
+    int jsno;
+    std::vector<int> jco;
+    std::vector<nec_float> ax, bx, cx;
+  };
 
-        for (int i = 0; i < m_geometry->jsno; i++ ) {
-          int ij = m_geometry->jco[i];
-          m_geometry->jco[i] = ((ij-1)/ np)* mp2+ij;
+  if ( i1 <= in2 ) {
+    /* Phase 1: precompute. trio() writes its outputs to m_geometry
+     * scratch arrays; we copy them out per source before moving on. */
+    const int n_segs = m_geometry->n_segments;
+    std::vector<cmww_source_data> source_data(n_segs + 1);
+
+    for ( int j = 1; j <= n_segs; j++ ) {
+      m_geometry->trio(j);
+      const int jsno = m_geometry->jsno;
+
+      cmww_source_data& sd = source_data[j];
+      sd.jsno = jsno;
+      sd.jco.resize(jsno);
+      sd.ax.resize(jsno);
+      sd.bx.resize(jsno);
+      sd.cx.resize(jsno);
+      /* Apply the same jco transform that the original loop does
+       * after trio(): map per-source connection index into the global
+       * matrix row. */
+      for ( int i = 0; i < jsno; i++ ) {
+        int ij = m_geometry->jco[i];
+        sd.jco[i] = ((ij - 1) / np) * mp2 + ij;
+        sd.ax[i] = m_geometry->ax[i];
+        sd.bx[i] = m_geometry->bx[i];
+        sd.cx[i] = m_geometry->cx[i];
+      }
+
+      /* cmww()'s prologue. We do it once per source here so each
+       * thread reading source_data[j] in Phase 2 doesn't redo it. */
+      const int jx = j;
+      const int jm1 = j - 1;
+      sd.m_s = m_geometry->segment_length[jm1];
+      sd.m_b = m_geometry->segment_radius[jm1];
+      sd.xj = m_geometry->x[jm1];
+      sd.yj = m_geometry->y[jm1];
+      sd.zj = m_geometry->z[jm1];
+      sd.cabj = m_geometry->cab[jm1];
+      sd.sabj = m_geometry->sab[jm1];
+      sd.salpj = m_geometry->salp[jm1];
+
+      if ( m_use_exk ) {
+        int ipr = m_geometry->icon1[jm1];
+        int iprx = std::abs(ipr) - 1;
+        int ind1_v = 2;
+        if ( ipr > PCHCON )
+          ind1_v = 0;
+        else if ( ipr == 0 )
+          ind1_v = 1;
+        else if ( (ipr == jx) && (sd.cabj * sd.cabj + sd.sabj * sd.sabj <= 1.e-8) )
+          ind1_v = 0;
+        else if ( (ipr > 0) && (m_geometry->icon2[iprx] == jx) )
+          ind1_v = m_geometry->test_ek_approximation(jm1, ipr - 1);
+        else if ( (ipr < 0) && (m_geometry->icon1[iprx] == -jx) )
+          ind1_v = m_geometry->test_ek_approximation(jm1, -ipr - 1);
+        sd.ind1 = ind1_v;
+
+        ipr = m_geometry->icon2[jm1];
+        int ind2_v;
+        if ( ipr > PCHCON ) ind2_v = 2;
+        else if ( ipr == 0 ) ind2_v = 1;
+        else if ( ipr < 0 ) {
+          int iprx2 = -ipr - 1;
+          if ( -m_geometry->icon2[iprx2] != jx ) ind2_v = 2;
+          else ind2_v = m_geometry->test_ek_approximation(jm1, iprx2);
+        } else { /* ipr > 0 */
+          if ( ipr != jx ) {
+            int iprx2 = ipr - 1;
+            if ( m_geometry->icon1[iprx2] != jx ) ind2_v = 2;
+            else ind2_v = m_geometry->test_ek_approximation(jm1, iprx2);
+          } else if ( (sd.cabj * sd.cabj + sd.sabj * sd.sabj) > 1.e-8 ) {
+            ind2_v = 2;
+          } else {
+            ind2_v = 0;
+          }
+        }
+        sd.ind2 = ind2_v;
+      } else {
+        sd.ind1 = 0;
+        sd.ind2 = 0;
+      }
+    }
+
+    /* Phase 2: observer-major parallel fill. Each thread owns a column
+     * range of in_cm. Inside its column, it iterates all sources j and
+     * accumulates contributions. Writes are L1-resident, no race. */
+#pragma omp parallel for schedule(static) default(shared)
+    for ( int ipr = 0; ipr < in2; ipr++ ) {
+      const int i = (i1 - 1) + ipr;
+      const nec_float xi = m_geometry->x[i];
+      const nec_float yi = m_geometry->y[i];
+      const nec_float zi = m_geometry->z[i];
+      const nec_float ai = m_geometry->segment_radius[i];
+      const nec_float cabi = m_geometry->cab[i];
+      const nec_float sabi = m_geometry->sab[i];
+      const nec_float salpi = m_geometry->salp[i];
+
+      for ( int j = 1; j <= n_segs; j++ ) {
+        const cmww_source_data& sd = source_data[j];
+
+        /* Install this source's state into thread-local slots that
+         * efld() will read. */
+        m_s = sd.m_s;
+        m_b = sd.m_b;
+        xj = sd.xj;
+        yj = sd.yj;
+        zj = sd.zj;
+        cabj = sd.cabj;
+        sabj = sd.sabj;
+        salpj = sd.salpj;
+        ind1 = sd.ind1;
+        ind2 = sd.ind2;
+
+        /* efld() writes its outputs to thread_local exk..ezc. */
+        efld( xi, yi, zi, ai, i != (j - 1) );
+
+        const nec_complex etk = exk * cabi + eyk * sabi + ezk * salpi;
+        const nec_complex ets = exs * cabi + eys * sabi + ezs * salpi;
+        const nec_complex etc = exc * cabi + eyc * sabi + ezc * salpi;
+
+        /* Transposed fill (itrp == 1 in the original cmww call):
+         * in_cm[row, ipr] += contributions. row = jco[ij]-1; ipr is
+         * this thread's owned column. */
+        for ( int ij = 0; ij < sd.jsno; ij++ ) {
+          const int64_t row = sd.jco[ij] - 1;
+          in_cm[row + ipr * nrow] += etk * sd.ax[ij]
+                                     + ets * sd.bx[ij]
+                                     + etc * sd.cx[ij];
         }
       }
-      /* implicit barrier here — all threads now see trio outputs */
+    }
 
-      if ( i1 <= in2)
-        cmww( j, i1, in2, in_cm, nrow, in_cm, nrow,1);
+    /* Phase 3: matrix loading modification. Per source j, write to its
+     * own column (j-1). Different sources -> different columns -> safe
+     * to parallelize over j. */
+    if ( nload != 0 ) {
+#pragma omp parallel for schedule(static) default(shared)
+      for ( int j = 1; j <= n_segs; j++ ) {
+        if ( j > np ) continue;
+        const int ipr = j;
+        if ( ipr < 1 || ipr > it ) continue;
 
-      if ( im1 <= im2) {
-#pragma omp single
-        {
-          complex_array temp = in_cm.segment((ist-1)*nrow, in_cm.size() - ((ist-1)*nrow));
-          cmws( j, im1, im2, temp, nrow, in_cm, nrow, 1);
-          /* CMWS (J,IM1,IM2,CM(1,IST),NROW,CM,NROW,1) */
+        const cmww_source_data& sd = source_data[j];
+        const nec_complex zaj = zarray[j - 1];
+        for ( int i = 0; i < sd.jsno; i++ ) {
+          const int64_t jss = sd.jco[i];
+          in_cm[(jss - 1) + (ipr - 1) * nrow] -= (sd.ax[i] + sd.cx[i]) * zaj;
         }
       }
-      /* matrix elements modified by loading */
-      if ( nload == 0)
-        continue;
+    }
+  } /* if ( i1 <= in2 ) */
 
-      if ( j > np)
-        continue;
-
-      int ipr = j;
-      if ( (ipr < 1) || (ipr > it) )
-        continue;
-
-#pragma omp single
-      {
-        nec_complex zaj= zarray[j-1];
-
-        for (int i = 0; i < m_geometry->jsno; i++ ) {
-          int64_t jss = m_geometry->jco[i];
-          in_cm[(jss-1)+(ipr-1)*nrow] -= ( m_geometry->ax[i]+ m_geometry->cx[i])* zaj;
-        }
+  /* Surface (cmws) branch — only fires when there are patches. Left
+   * serial; not exercised by wire-only geometries. */
+  if ( im1 <= im2 ) {
+    for ( int j = 1; j <= m_geometry->n_segments; j++ ) {
+      m_geometry->trio(j);
+      for ( int i = 0; i < m_geometry->jsno; i++ ) {
+        int ij = m_geometry->jco[i];
+        m_geometry->jco[i] = ((ij - 1) / np) * mp2 + ij;
       }
-    } /* for( j = 1; j <= n; j++ ) */
-  } /* omp parallel */
+      complex_array temp = in_cm.segment((ist - 1) * nrow,
+                                          in_cm.size() - ((ist - 1) * nrow));
+      cmws( j, im1, im2, temp, nrow, in_cm, nrow, 1 );
+    }
+  }
   
   int m = m_geometry->m;
   if ( m != 0)  {
