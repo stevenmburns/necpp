@@ -78,6 +78,16 @@ INITIAL_EXEC thread_local nec_float nec_context::t2zj;
 INITIAL_EXEC thread_local int nec_context::ind1;
 INITIAL_EXEC thread_local int nec_context::ind2;
 
+// Observer-side scratch — set by efld()'s ground-path prologue, read by
+// sflds() further down. See header comment on the declarations.
+INITIAL_EXEC thread_local int nec_context::isnor;
+INITIAL_EXEC thread_local nec_float nec_context::xo;
+INITIAL_EXEC thread_local nec_float nec_context::yo;
+INITIAL_EXEC thread_local nec_float nec_context::zo;
+INITIAL_EXEC thread_local nec_float nec_context::sn;
+INITIAL_EXEC thread_local nec_float nec_context::xsn;
+INITIAL_EXEC thread_local nec_float nec_context::ysn;
+
 #undef INITIAL_EXEC
 
 nec_context::nec_context() : fnorm(0,0), current_vector(0) {
@@ -6354,6 +6364,19 @@ void nec_context::sflds(const nec_float t, complex_array& e )
   nec_float cph, sph, zphs, r2s, rk, sfac, thet;
   nec_complex  erv, ezv, erh, ezh, eph;
 
+  // Per-call ground-wave scratch on the stack. The class-member
+  // `ground_wave` holds u/u2, which are set once during ground
+  // initialization (set_u) and read-only afterwards — copy them in so
+  // gwave() sees the right values, but mutate r1/r2/zmh/zph/xx1/xx2
+  // only on this local. Without this, concurrent observer threads in
+  // the cmset parallel-for raced on the shared `ground_wave` fields
+  // and gwave() could read partially-updated zph/r2/xx2 from a
+  // different thread's sflds(), perturbing the matrix by a few % in
+  // the Sommerfeld-Norton path.
+  c_ground_wave gw;
+  gw.u = ground_wave.u;
+  gw.u2 = ground_wave.u2;
+
   xt= xj + t* cabj;
   yt= yj + t* sabj;
   zt= zj + t* salpj;
@@ -6382,26 +6405,26 @@ void nec_context::sflds(const nec_float t, complex_array& e )
   if ( fabs( sph) < 1.0e-10)
     sph=0.0;
 
-  ground_wave.zph = zo+ zt;
-  zphs= ground_wave.zph* ground_wave.zph;
+  gw.zph = zo+ zt;
+  zphs= gw.zph* gw.zph;
   r2s= rhs+ zphs;
-  ground_wave.r2= sqrt( r2s);
-  rk= ground_wave.r2* two_pi();
-  ground_wave.xx2 = nec_complex( cos( rk),-sin( rk));
+  gw.r2= sqrt( r2s);
+  rk= gw.r2* two_pi();
+  gw.xx2 = nec_complex( cos( rk),-sin( rk));
 
   /*  Use Norton approximation for field due to ground.  Current is
     lumped at segment center with current moment for constant, sine,
     or cosine distribution. */
   if ( isnor != 1) {
-    ground_wave.zmh=1.0;
-    ground_wave.r1=1.;
-    ground_wave.xx1=0.;
-    gwave(erv, ezv, erh, ezh, eph, ground_wave);
+    gw.zmh=1.0;
+    gw.r1=1.;
+    gw.xx1=0.;
+    gwave(erv, ezv, erh, ezh, eph, gw);
 
-    nec_complex et = -__const1 * ground.frati* ground_wave.xx2/( r2s* ground_wave.r2);
+    nec_complex et = -__const1 * ground.frati* gw.xx2/( r2s* gw.r2);
     nec_complex er = 2.* et* nec_complex(1.0, rk);
     et= et* nec_complex(1.0 - rk* rk, rk);
-    nec_complex hrv = ( er+ et)* rho* ground_wave.zph/ r2s;
+    nec_complex hrv = ( er+ et)* rho* gw.zph/ r2s;
     nec_complex hzv = ( zphs* er- rhs* et)/ r2s;
     nec_complex hrh = ( rhs* er- zphs* et)/ r2s;
     erv= erv- hrv;
@@ -6432,20 +6455,20 @@ void nec_context::sflds(const nec_float t, complex_array& e )
 
   /* Interpolate in Sommerfeld field tables */
   if ( rho >= 1.0e-12)
-    thet= atan( ground_wave.zph/ rho);
+    thet= atan( gw.zph/ rho);
   else
     thet= pi_two();
 
   /*  Combine vertical and horizontal components and convert
     to x,y,z components. multiply by exp(-jkr)/r.
   */
-  ground.ggrid_interpolate( ground_wave.r2, thet, &erv, &ezv, &erh, &eph );
-  ground_wave.xx2= ground_wave.xx2 / ground_wave.r2;
+  ground.ggrid_interpolate( gw.r2, thet, &erv, &ezv, &erh, &eph );
+  gw.xx2= gw.xx2 / gw.r2;
   sfac= sn* cph;
-  erh= ground_wave.xx2*( salpj* erv+ sfac* erh);
-  ezh= ground_wave.xx2*( salpj* ezv- sfac* erv);
+  erh= gw.xx2*( salpj* erv+ sfac* erh);
+  ezh= gw.xx2*( salpj* ezv- sfac* erv);
   /* x,y,z fields for constant current */
-  eph= sn* sph* ground_wave.xx2* eph;
+  eph= sn* sph* gw.xx2* eph;
   e[0]= erh* rhx+ eph* phx;
   e[1]= erh* rhy+ eph* phy;
   e[2]= ezh;

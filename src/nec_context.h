@@ -885,9 +885,19 @@ public:
   int nop; /* My addition */
   complex_array symmetry_array;
   
-  /* common  /incom/ */
-  int isnor;
-  nec_float xo, yo, zo, sn, xsn, ysn;
+  /* common  /incom/ — observer-side scratch state written by efld() before
+   * it calls rom2()/sflds() down the Sommerfeld-Norton ground field path.
+   *
+   * Promoted to static thread_local so the cmset() observer-loop parallel
+   * fill can run safely: previously, two threads computing different
+   * (observer, source) cells would both write to these slots from their
+   * own efld() prologue, and one thread's sflds() could then read a
+   * partially-overwritten observer coordinate, perturbing matrix entries
+   * by enough to shift Z by ~0.5 Ω at N=30 (within "engineering
+   * tolerance" but non-reproducible across runs). Same pattern as
+   * m_s/xj/yj/zj/.../exk/eyk/... below. */
+  static thread_local int isnor;
+  static thread_local nec_float xo, yo, zo, sn, xsn, ysn;
   
   /* common  /tmi/ — gf() scratch state written by eksc()/ekscx().
    * thread_local so concurrent threads in the cmww observer loop don't
