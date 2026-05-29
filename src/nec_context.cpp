@@ -25,42 +25,60 @@
 #include <cstdlib>
 #include <vector>
 
-// Thread-local storage for efld()/hsfld()/hintg() scratch outputs.
-// See declaration in nec_context.h for rationale.
-thread_local nec_complex nec_context::exk;
-thread_local nec_complex nec_context::eyk;
-thread_local nec_complex nec_context::ezk;
-thread_local nec_complex nec_context::exs;
-thread_local nec_complex nec_context::eys;
-thread_local nec_complex nec_context::ezs;
-thread_local nec_complex nec_context::exc;
-thread_local nec_complex nec_context::eyc;
-thread_local nec_complex nec_context::ezc;
+// Thread-local storage for nec_context's per-thread scratch state.
+//
+// The __attribute__((tls_model("initial-exec"))) on each definition
+// replaces the default general-dynamic TLS access (which calls
+// __tls_get_addr at every reference — vtune showed this at ~10% of
+// CPU time on the gather-scatter fill) with the initial-exec model
+// (two-instruction FS-relative load, no function call). This works
+// because the PyNEC .so fits within the static TLS area the dynamic
+// loader pre-reserves; if it ever grows past that limit, dlopen
+// would fail with "cannot allocate memory in static TLS block" and
+// we'd need to drop back to general-dynamic.
+//
+// Critically, the attribute must be on the DEFINITION (here), not
+// the declaration in the header — gcc silently ignores it on a
+// `static thread_local` member declaration.
+#define INITIAL_EXEC __attribute__((tls_model("initial-exec")))
+
+// efld()/hsfld()/hintg() scratch outputs.
+INITIAL_EXEC thread_local nec_complex nec_context::exk;
+INITIAL_EXEC thread_local nec_complex nec_context::eyk;
+INITIAL_EXEC thread_local nec_complex nec_context::ezk;
+INITIAL_EXEC thread_local nec_complex nec_context::exs;
+INITIAL_EXEC thread_local nec_complex nec_context::eys;
+INITIAL_EXEC thread_local nec_complex nec_context::ezs;
+INITIAL_EXEC thread_local nec_complex nec_context::exc;
+INITIAL_EXEC thread_local nec_complex nec_context::eyc;
+INITIAL_EXEC thread_local nec_complex nec_context::ezc;
 
 // gf()/gh() scratch state written by eksc()/ekscx() and hsfld() helpers.
-thread_local int nec_context::ija;
-thread_local nec_float nec_context::zpk;
-thread_local nec_float nec_context::rkb2;
-thread_local nec_float nec_context::zpka;
-thread_local nec_float nec_context::rhks;
+INITIAL_EXEC thread_local int nec_context::ija;
+INITIAL_EXEC thread_local nec_float nec_context::zpk;
+INITIAL_EXEC thread_local nec_float nec_context::rkb2;
+INITIAL_EXEC thread_local nec_float nec_context::zpka;
+INITIAL_EXEC thread_local nec_float nec_context::rhks;
 
 // Per-source state — set by cmww()/cmws() prologues, read by efld() etc.
-thread_local nec_float nec_context::m_s;
-thread_local nec_float nec_context::m_b;
-thread_local nec_float nec_context::xj;
-thread_local nec_float nec_context::yj;
-thread_local nec_float nec_context::zj;
-thread_local nec_float nec_context::cabj;
-thread_local nec_float nec_context::sabj;
-thread_local nec_float nec_context::salpj;
-thread_local nec_float nec_context::t1xj;
-thread_local nec_float nec_context::t1yj;
-thread_local nec_float nec_context::t1zj;
-thread_local nec_float nec_context::t2xj;
-thread_local nec_float nec_context::t2yj;
-thread_local nec_float nec_context::t2zj;
-thread_local int nec_context::ind1;
-thread_local int nec_context::ind2;
+INITIAL_EXEC thread_local nec_float nec_context::m_s;
+INITIAL_EXEC thread_local nec_float nec_context::m_b;
+INITIAL_EXEC thread_local nec_float nec_context::xj;
+INITIAL_EXEC thread_local nec_float nec_context::yj;
+INITIAL_EXEC thread_local nec_float nec_context::zj;
+INITIAL_EXEC thread_local nec_float nec_context::cabj;
+INITIAL_EXEC thread_local nec_float nec_context::sabj;
+INITIAL_EXEC thread_local nec_float nec_context::salpj;
+INITIAL_EXEC thread_local nec_float nec_context::t1xj;
+INITIAL_EXEC thread_local nec_float nec_context::t1yj;
+INITIAL_EXEC thread_local nec_float nec_context::t1zj;
+INITIAL_EXEC thread_local nec_float nec_context::t2xj;
+INITIAL_EXEC thread_local nec_float nec_context::t2yj;
+INITIAL_EXEC thread_local nec_float nec_context::t2zj;
+INITIAL_EXEC thread_local int nec_context::ind1;
+INITIAL_EXEC thread_local int nec_context::ind2;
+
+#undef INITIAL_EXEC
 
 nec_context::nec_context() : fnorm(0,0), current_vector(0) {
   m_output_fp=NULL;

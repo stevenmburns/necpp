@@ -871,8 +871,13 @@ public:
    * pipeline always pairs an efld()/hsfld()/hintg() call with the
    * subsequent reads, so per-thread scope is enough. (Cost: all
    * nec_context instances share these slots — acceptable since we never
-   * run multiple simulations concurrently from one thread.) */
-  static thread_local nec_complex  exk, eyk, ezk, exs, eys, ezs, exc, eyc, ezc;
+   * run multiple simulations concurrently from one thread.)
+   *
+   * The initial-exec tls_model attribute lives on the .cpp definitions
+   * — see nec_context.cpp. Initial-exec replaces the __tls_get_addr
+   * call with a two-instruction FS-relative load, which vtune showed
+   * was ~10% of CPU time on the gather-scatter fill. */
+  static thread_local nec_complex exk, eyk, ezk, exs, eys, ezs, exc, eyc, ezc;
   
   /* common  /smat/ */
   int nop; /* My addition */
@@ -885,7 +890,7 @@ public:
   /* common  /tmi/ — gf() scratch state written by eksc()/ekscx().
    * thread_local so concurrent threads in the cmww observer loop don't
    * stomp on each other through the efld() -> eksc() -> gf() chain. */
-  static thread_local int ija; /* changed to ija to avoid conflict */
+  static thread_local int ija;
   static thread_local nec_float zpk, rkb2;
 
   /*common  /tmh/ — similar gh() scratch state. */
