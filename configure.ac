@@ -61,8 +61,10 @@ fi
 dnl ************************************************
 dnl *** Check for Lapack library
 dnl ************************************************
-AC_PROG_F77
-
+dnl (AC_PROG_F77 removed: the C++ engine reaches LAPACK through LAPACKE's C API,
+dnl  never a Fortran-mangled symbol, and nothing in the build uses Fortran. The
+dnl  probe only forced a gfortran dependency that broke configure on platforms
+dnl  without one, e.g. macOS.)
 AC_ARG_WITH([lapack],
   [AS_HELP_STRING([--without-lapack],
   [disable support for lapack])],
