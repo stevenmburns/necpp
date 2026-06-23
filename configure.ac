@@ -61,10 +61,15 @@ fi
 dnl ************************************************
 dnl *** Check for Lapack library
 dnl ************************************************
-dnl (AC_PROG_F77 removed: the C++ engine reaches LAPACK through LAPACKE's C API,
-dnl  never a Fortran-mangled symbol, and nothing in the build uses Fortran. The
-dnl  probe only forced a gfortran dependency that broke configure on platforms
-dnl  without one, e.g. macOS.)
+dnl No Fortran is involved: this C++ engine calls the *C-interface* LAPACK
+dnl symbols (LAPACKE_zgetrf_work / clapack_zgetrf — see matrix_algebra.cpp),
+dnl never a Fortran-mangled BLAS symbol. The old AX_BLAS/AX_LAPACK macros
+dnl probed for a Fortran compiler (to detect Fortran name-mangling) via an
+dnl AC_REQUIRE that autoconf hoists out of the AS_IF below — so the probe ran
+dnl unconditionally even with --without-lapack, and aborted configure on any
+dnl platform lacking gfortran (e.g. macOS). They are removed; --with-lapack now
+dnl verifies the C symbol clapack_zgetrf directly (pass the BLAS/LAPACK lib dirs
+dnl via LDFLAGS/LIBS, as the atlas build already does).
 AC_ARG_WITH([lapack],
   [AS_HELP_STRING([--without-lapack],
   [disable support for lapack])],
@@ -74,13 +79,9 @@ AC_ARG_WITH([lapack],
 LIBLAPACK=
   AS_IF([test "x$with_lapack" != xno],
   [
-    AX_BLAS([], [AC_MSG_ERROR([BLAS library not found])])
-    AX_LAPACK([], [AC_MSG_ERROR([LAPACK library not found])])
-
-    LIBS="$LAPACK_LIBS $BLAS_LIBS $LIBS $FLIBS"
     AC_CHECK_LIB(
-    [lapack], [clapack_zgetrf], 
-    [AC_SUBST([LIBLAPACK], ["$LAPACK_LIBS $BLAS_LIBS $LIBS $FLIBS"]) AC_DEFINE([LAPACK], [1], [Define if you have liblapack])],
+    [lapack], [clapack_zgetrf],
+    [AC_SUBST([LIBLAPACK], ["$LIBS"]) AC_DEFINE([LAPACK], [1], [Define if you have liblapack])],
     [AC_MSG_FAILURE([lapack library test failed (--without-lapack to disable)])],
     [])
   ])
