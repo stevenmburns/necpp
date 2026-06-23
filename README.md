@@ -1,5 +1,12 @@
 # NEC2++ Numerical Electromagnetic Code in C++
 
+> **Fork notice.** This is a modified fork of
+> [tmolteno/necpp](https://github.com/tmolteno/necpp), adding an
+> OpenMP-parallelised matrix fill, a LAPACKE solve path (so a tuned BLAS such as
+> OpenBLAS or MKL can be linked), and MSVC build portability. It remains licensed
+> under **GPL-2.0-or-later**. See [`CHANGES.md`](CHANGES.md) for the list of
+> modifications and how it is distributed.
+
 This is a free (GPL) electromagnetic simulation software compatable with NEC-2. It has been rewritten from the ground up.
 
 Nec2++ consists of a library that can be called from C++, C, python and Ruby, and so it can incorporated 
