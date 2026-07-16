@@ -53,8 +53,21 @@ class c_geometry
 public:
   c_geometry();
   void set_context(nec_context* m_context);
-  
-  
+
+  /*! \brief Enable or disable the wire/segment intersection checks.
+   *
+   *  On by default. wire() and geometry_complete() reject a deck whose wires
+   *  pass within a radius-sum of one another — a genuine mid-segment crossing,
+   *  or a segment midpoint landing on a neighbouring wire. NEC-2's own kernel
+   *  (and nec2c) do not perform this test, so real decks with closely-spaced,
+   *  touching, or crossing wires — car-body grids, collinear feed stubs, dense
+   *  airframe meshes — trip a fatal false positive on geometry NEC-2 solves
+   *  fine. Disable to restore NEC-2's permissiveness. Mirrors the
+   *  set_intersection_check knob on upstream necpp master.
+   */
+  void set_intersection_check(bool enable) { _check_intersections = enable; }
+
+
   /*! \brief Generates segment geometry for a straingt wire
           \param tag_id
           \param segment_count Number of Elements (should be around 12-20 per wavelength)
@@ -215,6 +228,7 @@ private:
   int patch_type;
   nec_3vector patch_x1, patch_x2, patch_x3, patch_x4;
   bool   _prev_sc;
+  bool   _check_intersections; // gate the wire/segment intersection tests
 };
 
 
