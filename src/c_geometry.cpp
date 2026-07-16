@@ -40,9 +40,11 @@ c_geometry::c_geometry()
   jsno = 0;
   nscon = 0;
   maxcon = 0;
-  
+
   m_context = NULL;
   m_output = NULL;
+
+  _check_intersections = true;
 }
 
 void c_geometry::set_context(nec_context* in_context)  {
@@ -488,7 +490,10 @@ void c_geometry::geometry_complete(nec_context* in_context, int gpflag)
   if (0 == np + mp)
     throw new nec_exception("Geometry has no wires or patches.");
     
-  /* Check to see whether any wires intersect with one another */
+  /* Check to see whether any wires intersect with one another
+     (skipped when the caller has disabled intersection checking — see
+     set_intersection_check; NEC-2/nec2c do not perform this test) */
+  if (_check_intersections)
   for (uint32_t i=0; i<m_wires.size(); i++)
   {
     nec_wire a = m_wires[i];
@@ -720,7 +725,10 @@ void c_geometry::wire( int tag_id, int segment_count, nec_float xw1, nec_float y
   
   nec_3vector seg_midpoint(wire_start + (dx/2)*delz);
   nec_3vector end_seg_midpoint = wire_end - (dx*delz / 2);
-  /* Check to see whether any wires intersect with the segment_midpoint */
+  /* Check to see whether any wires intersect with the segment_midpoint
+     (skipped when intersection checking is disabled — see
+     set_intersection_check; NEC-2/nec2c do not perform this test) */
+  if (_check_intersections)
   for (uint32_t i=0; i<m_wires.size(); i++)
   {
     nec_wire a = m_wires[i];
