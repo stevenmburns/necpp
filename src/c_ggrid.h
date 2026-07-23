@@ -18,6 +18,8 @@
 #ifndef __c_ggrid__
 #define __c_ggrid__
 
+#include <atomic>
+
 #include "math_util.h"
 #include "common.h"
 #include "misc.h"
@@ -54,6 +56,16 @@ public:
     nec_complex *f3, nec_complex *f4 );
 
   void sommerfeld( nec_float epr, nec_float sig, nec_float wavelength );
+
+private:
+  /* Identity of the grid currently held in m_ar1/m_ar2/m_ar3. Assigned a
+     fresh value from a global counter every time sommerfeld() refills the
+     grid, and stamped into each thread's interpolation cache: a cache
+     entry whose (owner, generation) doesn't match is from another grid —
+     a previous solve, another frequency, or another context served by
+     the same worker thread — and is discarded instead of reused. */
+  static std::atomic<unsigned long> s_grid_generation_counter;
+  unsigned long m_grid_generation = 0;
 };
 
 class c_ground_wave
