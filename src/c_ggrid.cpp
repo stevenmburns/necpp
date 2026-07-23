@@ -38,27 +38,36 @@ nec_float c_ggrid::m_ysa[3] = {0.,0.,.3490658504};
 void c_ggrid::interpolate( nec_float x, nec_float y, nec_complex *f1,
         nec_complex *f2, nec_complex *f3, nec_complex *f4 )
 {
-    static int ix, iy, ixs = -10, iys = -10, igrs = -10, ixeg=0, iyeg=0;
-    static int nxm2, nym2, nxms, nyms, nd, ndp;
-    static nec_float dx = 1., dy = 1., xs = 0., ys = 0., xz, yz;
-    static nec_complex a[4][4], b[4][4], c[4][4], d[4][4];
-    static int nda[3] = {11,17,9}, ndpa[3] = {110, 85, 72};
-    
+    /* Cell-cache state lives on the instance (reset per Sommerfeld grid);
+       reference aliases keep the historic SOMNEC variable names below. */
+    int &ix = m_ix, &iy = m_iy, &ixs = m_ixs, &iys = m_iys, &igrs = m_igrs;
+    int &ixeg = m_ixeg, &iyeg = m_iyeg;
+    int &nxm2 = m_nxm2, &nym2 = m_nym2, &nxms = m_nxms, &nyms = m_nyms;
+    int &nd = m_nd, &ndp = m_ndp;
+    nec_float &dx = m_dx, &dy = m_dy, &xs = m_xs, &ys = m_ys, &xz = m_xz, &yz = m_yz;
+    nec_complex (&a)[4][4] = m_a, (&b)[4][4] = m_b, (&c)[4][4] = m_c, (&d)[4][4] = m_d;
+    static const int nda[3] = {11,17,9}, ndpa[3] = {110, 85, 72};
+
     nec_complex p1, p2, p3, p4, fx1, fx2, fx3, fx4;
-    
-    bool recalculate = true;
-    
-    if( (x >= xs) && (y >= ys) ) {
+
+    /* A point below the current region's origin (jump) always forces a
+       recalculation — the cached cell belongs to another grid region and
+       its cubic coefficients must not be extrapolated across the region
+       boundary. Only an in-range point that falls in the same 4-by-4
+       point region as the previous point may reuse the old coefficients.
+       (This ordering matches NEC-2's INTRP / nec2c; it was inverted here,
+       which corrupted every downward region-boundary crossing — the gn 2
+       near-ground defect.) */
+    bool jump = (x < xs) || (y < ys);
+    if ( !jump ) {
         ix = (int)((x-xs) / dx)+1;
         iy = (int)((y-ys) / dy)+1;
-    } else {
-        /* if point lies in same 4 by 4 point region */
-        /* as previous point, old values are reused. */
-        if ( ((ix >= ixeg) && (iy >= iyeg)) &&
-             ((std::abs(ix - ixs) < 2) &&  (std::abs(iy - iys) < 2)) )
-            recalculate = false;
     }
-    
+
+    bool recalculate = jump ||
+        (ix < ixeg) || (iy < iyeg) ||
+        (std::abs(ix - ixs) >= 2) || (std::abs(iy - iys) >= 2);
+
     if (true == recalculate) {
         /* determine correct grid and grid region */
         int igr;
@@ -203,7 +212,12 @@ void c_ggrid::sommerfeld( nec_float epr, nec_float sig, nec_float wavelength )
     
     nec_float dr, dth, r, rk, thet, tfac1, tfac2;
     nec_complex erv, ezv, erh, eph, cl1, cl2, con;
-    
+
+    /* The grid is about to be refilled: invalidate interpolate()'s cached
+       cell so coefficients from a previous grid (another frequency or
+       ground) cannot be reused against this one. */
+    reset_interpolation();
+
     if(sig >= 0.0) {
         m_epscf = nec_complex(epr,-sig*wavelength*em::impedance_over_2pi());
     } else {

@@ -42,18 +42,43 @@ public:
   complex_array m_ar1, m_ar2, m_ar3;
   
   c_evlcom m_evlcom;
-  
+
+  c_ggrid() {
+    reset_interpolation();
+  }
+
   void initialize()  {
     m_ar1.resize(11*10*4);
     m_ar2.resize(17*5*4);
     m_ar3.resize(9*8*4);
   }
 
-  void interpolate( nec_float x, nec_float y, 
+  void interpolate( nec_float x, nec_float y,
     nec_complex *f1, nec_complex *f2,
     nec_complex *f3, nec_complex *f4 );
 
   void sommerfeld( nec_float epr, nec_float sig, nec_float wavelength );
+
+private:
+  /* Interpolation cell cache for interpolate() — was function-local
+     static (Fortran SAVE) state. Made per-instance and reset whenever
+     sommerfeld() fills a new grid, so coefficients computed against one
+     grid can never be reused against another (a new frequency or ground
+     in the same process). */
+  void reset_interpolation() {
+    m_ix = 0; m_iy = 0;
+    m_ixs = -10; m_iys = -10; m_igrs = -10;
+    m_ixeg = 0; m_iyeg = 0;
+    m_nxm2 = 0; m_nym2 = 0; m_nxms = 0; m_nyms = 0;
+    m_nd = 0; m_ndp = 0;
+    m_dx = 1.; m_dy = 1.; m_xs = 0.; m_ys = 0.;
+    m_xz = 0.; m_yz = 0.;
+  }
+
+  int m_ix, m_iy, m_ixs, m_iys, m_igrs, m_ixeg, m_iyeg;
+  int m_nxm2, m_nym2, m_nxms, m_nyms, m_nd, m_ndp;
+  nec_float m_dx, m_dy, m_xs, m_ys, m_xz, m_yz;
+  nec_complex m_a[4][4], m_b[4][4], m_c[4][4], m_d[4][4];
 };
 
 class c_ground_wave
