@@ -2221,19 +2221,19 @@ void nec_context::fill_reuse_prepare(int n_obs, const std::vector<cmww_source_da
   const real_array& cab = m_geometry->cab;
   const real_array& sab = m_geometry->sab;
   const real_array& salp = m_geometry->salp;
-  const bool exk = m_use_exk;
+  const bool use_exk = m_use_exk;
 
   std::vector<nec_float> snap;
   snap.reserve(10 * static_cast<size_t>(n) + 3);
   snap.push_back(n);
   snap.push_back(n_obs);
-  snap.push_back(exk ? 1.0 : 0.0);
+  snap.push_back(use_exk ? 1.0 : 0.0);
   for ( int i = 0; i < n; i++ ) {
     snap.push_back(xu[i]); snap.push_back(yu[i]); snap.push_back(zu[i]);
     snap.push_back(su[i]); snap.push_back(bu[i]);
     snap.push_back(cab[i]); snap.push_back(sab[i]); snap.push_back(salp[i]);
-    snap.push_back(exk ? sdv[i + 1].ind1 : 0);
-    snap.push_back(exk ? sdv[i + 1].ind2 : 0);
+    snap.push_back(use_exk ? sdv[i + 1].ind1 : 0);
+    snap.push_back(use_exk ? sdv[i + 1].ind2 : 0);
   }
   fill_reuse_state& fr = m_fill_reuse;
   if ( fr.built && snap == fr.snapshot )
@@ -2269,9 +2269,9 @@ void nec_context::fill_reuse_prepare(int n_obs, const std::vector<cmww_source_da
     std::map<int64_t, int64_t> omap;
     for ( int j = 0; j < n; j++ ) {
       auto k = std::make_tuple(fill_quant(su[j], inv_q),
-                               exk ? fill_quant(bu[j], inv_q) : int64_t(0),
-                               exk ? sdv[j + 1].ind1 : 0,
-                               exk ? sdv[j + 1].ind2 : 0);
+                               use_exk ? fill_quant(bu[j], inv_q) : int64_t(0),
+                               use_exk ? sdv[j + 1].ind1 : 0,
+                               use_exk ? sdv[j + 1].ind2 : 0);
       auto it = smap.emplace(k, static_cast<int64_t>(smap.size())).first;
       stype[j] = it->second;
       auto ot = omap.emplace(fill_quant(bu[j], inv_q), static_cast<int64_t>(omap.size())).first;
@@ -2292,8 +2292,11 @@ void nec_context::fill_reuse_prepare(int n_obs, const std::vector<cmww_source_da
   std::unique_ptr<std::atomic<uint64_t>[]> slots(new std::atomic<uint64_t>[nslots]);
   std::unique_ptr<std::atomic<int64_t>[]> rep(new std::atomic<int64_t>[cap]);
   std::vector<fill_pair_key> keys(cap);
+  /* int loop indices throughout: MSVC's OpenMP 2.0 wants them, and
+     nslots <= 4 * cap < 2^30, classes < 2^31 since npairs < 2^31. */
+  const int nslots_i = static_cast<int>(nslots);
   #pragma omp parallel for schedule(static)
-  for ( int64_t s = 0; s < nslots; s++ )
+  for ( int s = 0; s < nslots_i; s++ )
     slots[s].store(0, std::memory_order_relaxed);
   fr.cls.resize(npairs);
   int32_t* cls = fr.cls.data();
@@ -2549,8 +2552,9 @@ void nec_context::cmset( int64_t nrow, complex_array& in_cm, nec_float rkhx) {
       const auto teval0 = std::chrono::steady_clock::now();
 
       /* Phase 2a: one efld() per class, at its least (ipr, jm1) member. */
+      const int nk_i = static_cast<int>(nk);
 #pragma omp parallel for schedule(dynamic, 64) default(shared)
-      for ( int64_t c = 0; c < nk; c++ ) {
+      for ( int c = 0; c < nk_i; c++ ) {
         const int64_t p = fr.rep[c];
         const int ipr = static_cast<int>(p / n_segs);
         const int jm1 = static_cast<int>(p % n_segs);
@@ -2570,9 +2574,10 @@ void nec_context::cmset( int64_t nrow, complex_array& in_cm, nec_float rkhx) {
 
         efld( xi, yi, zi, ai, i != jm1 );
 
-        fr.tri[3 * c]     = exk * cabi + eyk * sabi + ezk * salpi;
-        fr.tri[3 * c + 1] = exs * cabi + eys * sabi + ezs * salpi;
-        fr.tri[3 * c + 2] = exc * cabi + eyc * sabi + ezc * salpi;
+        const int64_t c3 = 3 * static_cast<int64_t>(c);
+        fr.tri[c3]     = exk * cabi + eyk * sabi + ezk * salpi;
+        fr.tri[c3 + 1] = exs * cabi + eys * sabi + ezs * salpi;
+        fr.tri[c3 + 2] = exc * cabi + eyc * sabi + ezc * salpi;
 
         /* efld's lumped-element switch, r >= rkh, as efld computes r. */
         const nec_float xij = xi - xj, yij = yi - yj, zij = zi - zj;
@@ -2586,10 +2591,13 @@ void nec_context::cmset( int64_t nrow, complex_array& in_cm, nec_float rkhx) {
       /* Phase 2b: the observer-major scatter of Phase 2 below, with the
        * triple taken from the class table. */
       const bool verify = fill_reuse_verify();
-      nec_float verify_max = 0.0;
-#pragma omp parallel for schedule(static) default(shared) reduction(max:verify_max)
+      /* per-row maxima rather than reduction(max:), which MSVC's
+       * OpenMP 2.0 does not have */
+      std::vector<nec_float> verify_row(verify ? in2 : 0, 0.0);
+#pragma omp parallel for schedule(static) default(shared)
       for ( int ipr = 0; ipr < in2; ipr++ ) {
         const int i = (i1 - 1) + ipr;
+        nec_float verify_max = 0.0;
         const int32_t* crow = fr.cls.data() + static_cast<int64_t>(ipr) * n_segs;
         for ( int j = 1; j <= n_segs; j++ ) {
           const cmww_source_data& sd = source_data[j];
@@ -2615,6 +2623,7 @@ void nec_context::cmset( int64_t nrow, complex_array& in_cm, nec_float rkhx) {
               const nec_float den = std::abs(dk) + std::abs(ds) + std::abs(dc);
               const nec_float num = std::abs(dk - etk) + std::abs(ds - ets) + std::abs(dc - etc);
               if ( den > 0.0 ) verify_max = std::max(verify_max, num / den);
+              verify_row[ipr] = verify_max;
             }
           } else {
             m_s = sd.m_s; m_b = sd.m_b;
@@ -2649,7 +2658,8 @@ void nec_context::cmset( int64_t nrow, complex_array& in_cm, nec_float rkhx) {
           std::chrono::duration<double>(t2 - teval1).count());
       }
       if ( verify )
-        std::fprintf(stderr, "[pynec] fill-reuse verify: max per-pair |triple - direct| / |direct| = %.3e\n", verify_max);
+        std::fprintf(stderr, "[pynec] fill-reuse verify: max per-pair |triple - direct| / |direct| = %.3e\n",
+          *std::max_element(verify_row.begin(), verify_row.end()));
     } else {
     /* Phase 2: observer-major parallel fill. Each thread owns a column
      * range of in_cm. Inside its column, it iterates all sources j and
