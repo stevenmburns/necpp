@@ -20,9 +20,16 @@
 #include "c_geometry.h"
 #include "nec_exception.h"
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
+#include <memory>
+#include <tuple>
 #include <vector>
 
 // Thread-local storage for nec_context's per-thread scratch state.
@@ -92,6 +99,7 @@ INITIAL_EXEC thread_local nec_float nec_context::ysn;
 
 nec_context::nec_context() : fnorm(0,0), current_vector(0) {
   m_output_fp=NULL;
+  m_fill_reuse_mode = -1;
   m_geometry = new c_geometry();
   inc=0;
   isave=0;
@@ -329,6 +337,7 @@ This function prepares for a calculation by calling calc_prepare().
 void nec_context::geometry_complete(int gpflag) {
   DEBUG_TRACE("geometry_complete()");
   m_geometry->geometry_complete(this, gpflag);
+  m_fill_reuse = fill_reuse_state();
   calc_prepare();
 }
 
@@ -1546,13 +1555,21 @@ void nec_context::structure_segment_loading()
   antenna_env();
 
   /* fill and factor primary interaction matrix */
+  const auto wall0 = std::chrono::steady_clock::now();
   secnds( &tim1 );
   cmset( neq, cm, rkh );
   secnds( &tim2 );
+  const auto wall1 = std::chrono::steady_clock::now();
   tim= tim2- tim1;
   factrs(m_output, npeq, neq, cm, ip );
   secnds( &tim1 );
   tim2= tim1- tim2;
+  if ( std::getenv("PYNEC_FILL_TIMING") ) {
+    const auto wall2 = std::chrono::steady_clock::now();
+    std::fprintf(stderr, "[pynec] fill %.3f s  factor %.3f s (wall)\n",
+      std::chrono::duration<double>(wall1 - wall0).count(),
+      std::chrono::duration<double>(wall2 - wall1).count());
+  }
   
   m_output.end_section();
   m_output.line("                             ---------- MATRIX TIMING ----------");
@@ -2083,6 +2100,284 @@ void nec_context::load()
   } /* while( true ) */
 }
 
+/*-----------------------------------------------------------------------*/
+/* Fill-pair reuse.
+
+   efld() for a wire source j and a wire observer i, projected onto the
+   observer's direction, gives the triple (etk, ets, etc) that cmset()
+   scatters through source j's junction coefficients. In free space that
+   triple depends on (derived from efld/eksc/ekscx, read 2026-11-10):
+
+     source:   segment length m_s; with the extended kernel also the
+               source radius m_b and the end flags ind1/ind2
+     observer: radius ai
+     relative: zp  = (r_i - r_j) . d_j           (signed axial offset)
+               rho = |(r_i - r_j) - zp d_j|      (radial distance; efld's
+                     rh = sqrt(rho^2 + ai^2), r = sqrt(zp^2 + rh^2))
+               cax = d_i . d_j                    (axial part of d_i)
+               crad = ((r_i - r_j) - zp d_j) . d_i  (radial part, signed;
+                     efld divides it by rh)
+               self = (i == j)                    (ijx: diagonal term)
+     global:   rkh (lumped-element switch r >= rkh), the frequency
+
+   The field efld builds is tez*d_j + ter*rho_vec/rh, so the third axis
+   d_j x rho_hat never enters the projection: the key is complete. All
+   lengths are taken in metres (before frequency_scale) so one
+   classification serves every frequency; geometry scales uniformly.
+
+   Lengths are quantised to q = 2^-40 * L (L = the largest |coordinate|
+   plus the longest segment), cosines to 2^-40. Rounding noise on a
+   genuine repeat is ~2^-52 * L, so a repeat lands in one cell except
+   with probability ~2^-12 per quantity (that only splits a class; it is
+   never wrong). Two members of one class differ by < q in each
+   quantity. The classification compares the FULL quantised key, never
+   just its hash.
+
+   Discontinuities: r >= rkh switches efld to the lumped element. A class
+   whose representative's r lies within 8 q of rkh (scaled) is marked
+   unsafe for that frequency and its members are evaluated directly. The
+   adaptive Romberg in intx() (tolerance 1e-4) can in principle step
+   differently for inputs < q apart; either result is a converged
+   quadrature of the same integral, the same exposure the unmodified
+   code has to rounding in the coordinates.
+
+   Ground (image or Sommerfeld/Norton) makes efld depend on the heights
+   and the absolute position; reuse is disabled whenever a ground is
+   present. Patches (cmws/cmsw) are untouched. */
+
+namespace {
+
+/* Built-in default when neither set_fill_reuse() nor PYNEC_FILL_REUSE
+   says otherwise. */
+const int FILL_REUSE_DEFAULT = 0;
+
+struct fill_pair_key {
+  int64_t t;     /* source type << 32 | observer type << 1 | self */
+  int64_t zp, rho, cax, crad;
+  bool operator==(const fill_pair_key& o) const {
+    return t == o.t && zp == o.zp && rho == o.rho && cax == o.cax && crad == o.crad;
+  }
+};
+
+inline uint64_t fill_mix64(uint64_t x) {
+  x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+  x ^= x >> 27; x *= 0x94d049bb133111ebULL;
+  x ^= x >> 31;
+  return x;
+}
+
+inline uint64_t fill_hash(const fill_pair_key& k) {
+  uint64_t h = fill_mix64(static_cast<uint64_t>(k.t) + 0x9e3779b97f4a7c15ULL);
+  h = fill_mix64(h ^ static_cast<uint64_t>(k.zp));
+  h = fill_mix64(h ^ static_cast<uint64_t>(k.rho));
+  h = fill_mix64(h ^ static_cast<uint64_t>(k.cax));
+  h = fill_mix64(h ^ static_cast<uint64_t>(k.crad));
+  return h;
+}
+
+inline int64_t fill_quant(nec_float v, nec_float inv_q) {
+  return static_cast<int64_t>(std::llround(v * inv_q));
+}
+
+const uint32_t FILL_SLOT_BUSY = 0xFFFFFFFFu;
+const uint32_t FILL_SLOT_OVF  = 0xFFFFFFFEu;
+
+} /* namespace */
+
+void nec_context::set_fill_reuse(int mode) {
+  m_fill_reuse_mode = (mode < 0) ? -1 : (mode ? 1 : 0);
+}
+
+int64_t nec_context::get_fill_reuse_classes() const {
+  return m_fill_reuse.last_classes;
+}
+
+bool nec_context::fill_reuse_wanted() {
+  if ( m_fill_reuse_mode >= 0 )
+    return m_fill_reuse_mode == 1;
+  const char* e = std::getenv("PYNEC_FILL_REUSE");
+  if ( e && e[0] == '0' ) return false;
+  if ( e && (e[0] == '1' || e[0] == '2') ) return true;
+  return FILL_REUSE_DEFAULT != 0;
+}
+
+/* PYNEC_FILL_REUSE=2: reuse on, and every pair is also evaluated
+   directly and compared with its class triple (a diagnostic; slow). */
+static bool fill_reuse_verify() {
+  const char* e = std::getenv("PYNEC_FILL_REUSE");
+  return e && e[0] == '2';
+}
+
+/* Classify every ordered (observer ipr < n_obs, source jm1) wire pair.
+   Rebuilds only when the snapshot of what the key is derived from has
+   changed since the last call. */
+void nec_context::fill_reuse_prepare(int n_obs, const std::vector<cmww_source_data>& sdv) {
+  const int n = m_geometry->n_segments;
+  const real_array& xu = m_geometry->get_x_unscaled();
+  const real_array& yu = m_geometry->get_y_unscaled();
+  const real_array& zu = m_geometry->get_z_unscaled();
+  const real_array& su = m_geometry->get_si_unscaled();
+  const real_array& bu = m_geometry->get_bi_unscaled();
+  const real_array& cab = m_geometry->cab;
+  const real_array& sab = m_geometry->sab;
+  const real_array& salp = m_geometry->salp;
+  const bool exk = m_use_exk;
+
+  std::vector<nec_float> snap;
+  snap.reserve(10 * static_cast<size_t>(n) + 3);
+  snap.push_back(n);
+  snap.push_back(n_obs);
+  snap.push_back(exk ? 1.0 : 0.0);
+  for ( int i = 0; i < n; i++ ) {
+    snap.push_back(xu[i]); snap.push_back(yu[i]); snap.push_back(zu[i]);
+    snap.push_back(su[i]); snap.push_back(bu[i]);
+    snap.push_back(cab[i]); snap.push_back(sab[i]); snap.push_back(salp[i]);
+    snap.push_back(exk ? sdv[i + 1].ind1 : 0);
+    snap.push_back(exk ? sdv[i + 1].ind2 : 0);
+  }
+  fill_reuse_state& fr = m_fill_reuse;
+  if ( fr.built && snap == fr.snapshot )
+    return;
+
+  const auto t0 = std::chrono::steady_clock::now();
+  fr = fill_reuse_state();
+  fr.snapshot.swap(snap);
+  fr.built = true;
+  fr.n_src = n;
+  fr.n_obs = n_obs;
+
+  const int64_t npairs = static_cast<int64_t>(n_obs) * n;
+  if ( n == 0 || n_obs == 0 || npairs >= (int64_t(1) << 31) )
+    return; /* usable stays false */
+
+  nec_float lmax = 0.0, smax = 0.0;
+  for ( int i = 0; i < n; i++ ) {
+    lmax = std::max(lmax, std::max(std::fabs(xu[i]), std::max(std::fabs(yu[i]), std::fabs(zu[i]))));
+    smax = std::max(smax, su[i]);
+  }
+  const nec_float lref = lmax + smax;
+  const nec_float q = std::ldexp(lref, -40);
+  const nec_float inv_q = 1.0 / q;
+  const nec_float inv_qd = std::ldexp(1.0, 40);
+  fr.q_len = q;
+
+  /* Per-segment types: what the key needs from the source alone and the
+     observer alone, folded to small ids. */
+  std::vector<int64_t> stype(n), otype(n);
+  {
+    std::map<std::tuple<int64_t, int64_t, int, int>, int64_t> smap;
+    std::map<int64_t, int64_t> omap;
+    for ( int j = 0; j < n; j++ ) {
+      auto k = std::make_tuple(fill_quant(su[j], inv_q),
+                               exk ? fill_quant(bu[j], inv_q) : int64_t(0),
+                               exk ? sdv[j + 1].ind1 : 0,
+                               exk ? sdv[j + 1].ind2 : 0);
+      auto it = smap.emplace(k, static_cast<int64_t>(smap.size())).first;
+      stype[j] = it->second;
+      auto ot = omap.emplace(fill_quant(bu[j], inv_q), static_cast<int64_t>(omap.size())).first;
+      otype[j] = ot->second;
+    }
+  }
+
+  /* One attempt, capped at npairs/2 classes (below 2^20 pairs' worth)
+     or npairs/8 (above): past that the table and keys cost more memory
+     than the saving is worth. The scan aborts as soon as the cap is hit,
+     so a geometry with few repeats pays only part of one scan. */
+  const int64_t cap = std::min<int64_t>(npairs / 2 + 1,
+                                        std::max<int64_t>(int64_t(1) << 20, npairs / 8));
+  int64_t nslots = 1;
+  while ( nslots < 2 * cap ) nslots <<= 1;
+  const uint64_t mask = static_cast<uint64_t>(nslots - 1);
+
+  std::unique_ptr<std::atomic<uint64_t>[]> slots(new std::atomic<uint64_t>[nslots]);
+  std::unique_ptr<std::atomic<int64_t>[]> rep(new std::atomic<int64_t>[cap]);
+  std::vector<fill_pair_key> keys(cap);
+  #pragma omp parallel for schedule(static)
+  for ( int64_t s = 0; s < nslots; s++ )
+    slots[s].store(0, std::memory_order_relaxed);
+  fr.cls.resize(npairs);
+  int32_t* cls = fr.cls.data();
+  std::atomic<int64_t> count(0);
+  std::atomic<bool> overflow(false);
+
+  #pragma omp parallel for schedule(dynamic, 8) default(shared)
+  for ( int ipr = 0; ipr < n_obs; ipr++ ) {
+    if ( overflow.load(std::memory_order_relaxed) ) continue;
+    const nec_float xi = xu[ipr], yi = yu[ipr], zi = zu[ipr];
+    const nec_float cabi = cab[ipr], sabi = sab[ipr], salpi = salp[ipr];
+    const int64_t oty = otype[ipr] << 1;
+    bool stop = false;
+    for ( int jm1 = 0; jm1 < n && !stop; jm1++ ) {
+      const nec_float cj = cab[jm1], sj = sab[jm1], aj = salp[jm1];
+      const nec_float dx = xi - xu[jm1], dy = yi - yu[jm1], dz = zi - zu[jm1];
+      const nec_float zp = dx * cj + dy * sj + dz * aj;
+      const nec_float rx = dx - cj * zp, ry = dy - sj * zp, rz = dz - aj * zp;
+      fill_pair_key k;
+      k.t = (stype[jm1] << 32) | oty | (ipr == jm1 ? 1 : 0);
+      k.zp = fill_quant(zp, inv_q);
+      k.rho = fill_quant(std::sqrt(rx * rx + ry * ry + rz * rz), inv_q);
+      k.cax = fill_quant(cabi * cj + sabi * sj + salpi * aj, inv_qd);
+      k.crad = fill_quant(rx * cabi + ry * sabi + rz * salpi, inv_q);
+      const uint64_t h = fill_hash(k);
+      const uint64_t tag = ((h >> 32) | 1u) << 32;
+      const int64_t p = static_cast<int64_t>(ipr) * n + jm1;
+      uint64_t idx = h & mask;
+      for (;;) {
+        uint64_t v = slots[idx].load(std::memory_order_acquire);
+        if ( v == 0 ) {
+          const uint64_t busy = tag | FILL_SLOT_BUSY;
+          if ( slots[idx].compare_exchange_strong(v, busy, std::memory_order_acq_rel,
+                                                  std::memory_order_acquire) ) {
+            const int64_t c = count.fetch_add(1, std::memory_order_relaxed);
+            if ( c >= cap ) {
+              overflow.store(true, std::memory_order_relaxed);
+              slots[idx].store(tag | FILL_SLOT_OVF, std::memory_order_release);
+              stop = true;
+              break;
+            }
+            keys[c] = k;
+            rep[c].store(p, std::memory_order_relaxed);
+            slots[idx].store(tag | static_cast<uint64_t>(c), std::memory_order_release);
+            cls[p] = static_cast<int32_t>(c);
+            break;
+          }
+          /* lost the race: v now holds the winner's slot word */
+        }
+        if ( (v & 0xFFFFFFFF00000000ULL) == tag ) {
+          while ( static_cast<uint32_t>(v) == FILL_SLOT_BUSY )
+            v = slots[idx].load(std::memory_order_acquire);
+          const uint32_t c = static_cast<uint32_t>(v);
+          if ( c == FILL_SLOT_OVF ) { stop = true; break; }
+          if ( keys[c] == k ) { /* full-key confirmation */
+            cls[p] = static_cast<int32_t>(c);
+            int64_t cur = rep[c].load(std::memory_order_relaxed);
+            while ( p < cur && !rep[c].compare_exchange_weak(cur, p, std::memory_order_relaxed) ) {}
+            break;
+          }
+        }
+        idx = (idx + 1) & mask;
+      }
+    }
+  }
+
+  if ( overflow.load() ) {
+    std::vector<int32_t>().swap(fr.cls);
+  } else {
+    const int64_t nk = count.load();
+    fr.rep.resize(nk);
+    for ( int64_t c = 0; c < nk; c++ )
+      fr.rep[c] = rep[c].load(std::memory_order_relaxed);
+    fr.usable = true;
+  }
+  fr.classify_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  if ( std::getenv("PYNEC_FILL_TIMING") )
+    std::fprintf(stderr, "[pynec] fill-reuse classify: %s, %lld pairs, %lld classes (cap %lld), %.3f s, %d src types, q=%.3g m\n",
+      fr.usable ? "ok" : "over cap, reuse off", static_cast<long long>(npairs),
+      static_cast<long long>(fr.usable ? (long long)fr.rep.size() : (long long)count.load()),
+      static_cast<long long>(cap), fr.classify_seconds,
+      static_cast<int>(*std::max_element(stype.begin(), stype.end()) + 1), q);
+}
+
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wconversion"
 
@@ -2231,6 +2526,131 @@ void nec_context::cmset( int64_t nrow, complex_array& in_cm, nec_float rkhx) {
       }
     }
 
+    /* Fill-pair reuse (see fill_reuse_prepare): free space only. */
+    const bool timing = std::getenv("PYNEC_FILL_TIMING") != nullptr;
+    const auto tfill0 = std::chrono::steady_clock::now();
+    bool use_reuse = (i1 == 1) && fill_reuse_wanted()
+        && !ground.present() && !ground.type_sommerfeld_norton();
+    if ( use_reuse ) {
+      fill_reuse_prepare(static_cast<int>(in2), source_data);
+      use_reuse = m_fill_reuse.usable;
+    }
+    m_fill_reuse.last_classes = use_reuse ? static_cast<int64_t>(m_fill_reuse.rep.size()) : -1;
+
+    if ( use_reuse ) {
+      fill_reuse_state& fr = m_fill_reuse;
+      const int64_t nk = static_cast<int64_t>(fr.rep.size());
+      fr.tri.resize(3 * nk);
+      fr.unsafe.resize(nk);
+      const real_array& su = m_geometry->get_si_unscaled();
+      /* metres -> wavelengths at this frequency */
+      const nec_float fscale = m_geometry->segment_length[0] / su[0];
+      const nec_float guard = 8.0 * fr.q_len * fscale + 1.0e-12 * rkh;
+      const auto teval0 = std::chrono::steady_clock::now();
+
+      /* Phase 2a: one efld() per class, at its least (ipr, jm1) member. */
+#pragma omp parallel for schedule(dynamic, 64) default(shared)
+      for ( int64_t c = 0; c < nk; c++ ) {
+        const int64_t p = fr.rep[c];
+        const int ipr = static_cast<int>(p / n_segs);
+        const int jm1 = static_cast<int>(p % n_segs);
+        const cmww_source_data& sd = source_data[jm1 + 1];
+        m_s = sd.m_s; m_b = sd.m_b;
+        xj = sd.xj; yj = sd.yj; zj = sd.zj;
+        cabj = sd.cabj; sabj = sd.sabj; salpj = sd.salpj;
+        ind1 = sd.ind1; ind2 = sd.ind2;
+        const int i = (i1 - 1) + ipr;
+        const nec_float xi = m_geometry->x[i];
+        const nec_float yi = m_geometry->y[i];
+        const nec_float zi = m_geometry->z[i];
+        const nec_float ai = m_geometry->segment_radius[i];
+        const nec_float cabi = m_geometry->cab[i];
+        const nec_float sabi = m_geometry->sab[i];
+        const nec_float salpi = m_geometry->salp[i];
+
+        efld( xi, yi, zi, ai, i != jm1 );
+
+        fr.tri[3 * c]     = exk * cabi + eyk * sabi + ezk * salpi;
+        fr.tri[3 * c + 1] = exs * cabi + eys * sabi + ezs * salpi;
+        fr.tri[3 * c + 2] = exc * cabi + eyc * sabi + ezc * salpi;
+
+        /* efld's lumped-element switch, r >= rkh, as efld computes r. */
+        const nec_float xij = xi - xj, yij = yi - yj, zij = zi - zj;
+        const nec_float zp = xij * cabj + yij * sabj + zij * salpj;
+        const nec_float rhx = xij - cabj * zp, rhy = yij - sabj * zp, rhz = zij - salpj * zp;
+        const nec_float r = std::sqrt(zp * zp + rhx * rhx + rhy * rhy + rhz * rhz + ai * ai);
+        fr.unsafe[c] = (std::fabs(r - rkh) <= guard) ? 1 : 0;
+      }
+      const auto teval1 = std::chrono::steady_clock::now();
+
+      /* Phase 2b: the observer-major scatter of Phase 2 below, with the
+       * triple taken from the class table. */
+      const bool verify = fill_reuse_verify();
+      nec_float verify_max = 0.0;
+#pragma omp parallel for schedule(static) default(shared) reduction(max:verify_max)
+      for ( int ipr = 0; ipr < in2; ipr++ ) {
+        const int i = (i1 - 1) + ipr;
+        const int32_t* crow = fr.cls.data() + static_cast<int64_t>(ipr) * n_segs;
+        for ( int j = 1; j <= n_segs; j++ ) {
+          const cmww_source_data& sd = source_data[j];
+          const int32_t c = crow[j - 1];
+          nec_complex etk, ets, etc;
+          if ( !fr.unsafe[c] ) {
+            etk = fr.tri[3 * static_cast<int64_t>(c)];
+            ets = fr.tri[3 * static_cast<int64_t>(c) + 1];
+            etc = fr.tri[3 * static_cast<int64_t>(c) + 2];
+            if ( verify ) {
+              m_s = sd.m_s; m_b = sd.m_b;
+              xj = sd.xj; yj = sd.yj; zj = sd.zj;
+              cabj = sd.cabj; sabj = sd.sabj; salpj = sd.salpj;
+              ind1 = sd.ind1; ind2 = sd.ind2;
+              const nec_float cabi = m_geometry->cab[i];
+              const nec_float sabi = m_geometry->sab[i];
+              const nec_float salpi = m_geometry->salp[i];
+              efld( m_geometry->x[i], m_geometry->y[i], m_geometry->z[i],
+                    m_geometry->segment_radius[i], i != (j - 1) );
+              const nec_complex dk = exk * cabi + eyk * sabi + ezk * salpi;
+              const nec_complex ds = exs * cabi + eys * sabi + ezs * salpi;
+              const nec_complex dc = exc * cabi + eyc * sabi + ezc * salpi;
+              const nec_float den = std::abs(dk) + std::abs(ds) + std::abs(dc);
+              const nec_float num = std::abs(dk - etk) + std::abs(ds - ets) + std::abs(dc - etc);
+              if ( den > 0.0 ) verify_max = std::max(verify_max, num / den);
+            }
+          } else {
+            m_s = sd.m_s; m_b = sd.m_b;
+            xj = sd.xj; yj = sd.yj; zj = sd.zj;
+            cabj = sd.cabj; sabj = sd.sabj; salpj = sd.salpj;
+            ind1 = sd.ind1; ind2 = sd.ind2;
+            const nec_float cabi = m_geometry->cab[i];
+            const nec_float sabi = m_geometry->sab[i];
+            const nec_float salpi = m_geometry->salp[i];
+            efld( m_geometry->x[i], m_geometry->y[i], m_geometry->z[i],
+                  m_geometry->segment_radius[i], i != (j - 1) );
+            etk = exk * cabi + eyk * sabi + ezk * salpi;
+            ets = exs * cabi + eys * sabi + ezs * salpi;
+            etc = exc * cabi + eyc * sabi + ezc * salpi;
+          }
+          for ( int ij = 0; ij < sd.jsno; ij++ ) {
+            const int64_t row = sd.jco[ij] - 1;
+            in_cm[row + ipr * nrow] += etk * sd.ax[ij]
+                                       + ets * sd.bx[ij]
+                                       + etc * sd.cx[ij];
+          }
+        }
+      }
+      if ( timing ) {
+        int64_t nun = 0;
+        for ( int64_t c = 0; c < nk; c++ ) nun += fr.unsafe[c];
+        const auto t2 = std::chrono::steady_clock::now();
+        std::fprintf(stderr, "[pynec] fill-reuse on: %lld classes (%lld unsafe), prepare %.3f s, eval %.3f s, scatter %.3f s\n",
+          static_cast<long long>(nk), static_cast<long long>(nun),
+          std::chrono::duration<double>(teval0 - tfill0).count(),
+          std::chrono::duration<double>(teval1 - teval0).count(),
+          std::chrono::duration<double>(t2 - teval1).count());
+      }
+      if ( verify )
+        std::fprintf(stderr, "[pynec] fill-reuse verify: max per-pair |triple - direct| / |direct| = %.3e\n", verify_max);
+    } else {
     /* Phase 2: observer-major parallel fill. Each thread owns a column
      * range of in_cm. Inside its column, it iterates all sources j and
      * accumulates contributions. Writes are L1-resident, no race. */
@@ -2279,6 +2699,10 @@ void nec_context::cmset( int64_t nrow, complex_array& in_cm, nec_float rkhx) {
         }
       }
     }
+    if ( timing )
+      std::fprintf(stderr, "[pynec] fill-reuse off: wire-wire %.3f s\n",
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - tfill0).count());
+    } /* if ( use_reuse ) else */
 
     /* Phase 3: matrix loading modification. Per source j, write to its
      * own column (j-1). Different sources -> different columns -> safe
