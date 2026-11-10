@@ -2643,7 +2643,12 @@ void nec_context::cmset( int64_t nrow, complex_array& in_cm, nec_float rkhx) {
               const nec_complex dk = exk * cabi + eyk * sabi + ezk * salpi;
               const nec_complex ds = exs * cabi + eys * sabi + ezs * salpi;
               const nec_complex dc = exc * cabi + eyc * sabi + ezc * salpi;
-              const nec_float den = std::abs(dk) + std::abs(ds) + std::abs(dc);
+              /* scale: the unprojected field, so a projection that
+               * cancels to rounding noise (d_i orthogonal to the field)
+               * does not read as a large relative error */
+              const nec_float den = std::abs(exk) + std::abs(eyk) + std::abs(ezk)
+                                  + std::abs(exs) + std::abs(eys) + std::abs(ezs)
+                                  + std::abs(exc) + std::abs(eyc) + std::abs(ezc);
               const nec_float num = std::abs(dk - etk) + std::abs(ds - ets) + std::abs(dc - etc);
               if ( den > 0.0 ) verify_max = std::max(verify_max, num / den);
               verify_row[ipr] = verify_max;
@@ -2681,7 +2686,7 @@ void nec_context::cmset( int64_t nrow, complex_array& in_cm, nec_float rkhx) {
           std::chrono::duration<double>(t2 - teval1).count());
       }
       if ( verify )
-        std::fprintf(stderr, "[pynec] fill-reuse verify: max per-pair |triple - direct| / |direct| = %.3e\n",
+        std::fprintf(stderr, "[pynec] fill-reuse verify: max per-pair |triple - direct| / |field| = %.3e\n",
           *std::max_element(verify_row.begin(), verify_row.end()));
     } else {
     /* Phase 2: observer-major parallel fill. Each thread owns a column
