@@ -2290,8 +2290,10 @@ void nec_context::fill_reuse_prepare(int n_obs, const std::vector<cmww_source_da
   const uint64_t mask = static_cast<uint64_t>(nslots - 1);
 
   std::unique_ptr<std::atomic<uint64_t>[]> slots(new std::atomic<uint64_t>[nslots]);
+  /* rep and keys are default-initialised (not zeroed): only the pages of
+     the classes actually created become resident. */
   std::unique_ptr<std::atomic<int64_t>[]> rep(new std::atomic<int64_t>[cap]);
-  std::vector<fill_pair_key> keys(cap);
+  std::unique_ptr<fill_pair_key[]> keys(new fill_pair_key[cap]);
   /* int loop indices throughout: MSVC's OpenMP 2.0 wants them, and
      nslots <= 4 * cap < 2^30, classes < 2^31 since npairs < 2^31. */
   const int nslots_i = static_cast<int>(nslots);
@@ -2366,10 +2368,31 @@ void nec_context::fill_reuse_prepare(int n_obs, const std::vector<cmww_source_da
   if ( overflow.load() ) {
     std::vector<int32_t>().swap(fr.cls);
   } else {
-    const int64_t nk = count.load();
+    /* Renumber classes in order of their representative (least member),
+       so ids, and the triple table's layout, are deterministic and
+       follow the observer-major scan the fill makes. */
+    const int nk = static_cast<int>(count.load());
+    keys.reset();
+    slots.reset();
+    std::vector<std::pair<int64_t, int32_t> > order(nk);
+    for ( int c = 0; c < nk; c++ )
+      order[c] = std::make_pair(rep[c].load(std::memory_order_relaxed), static_cast<int32_t>(c));
+    rep.reset();
+    std::sort(order.begin(), order.end());
+    std::vector<int32_t> newid(nk);
     fr.rep.resize(nk);
-    for ( int64_t c = 0; c < nk; c++ )
-      fr.rep[c] = rep[c].load(std::memory_order_relaxed);
+    for ( int c = 0; c < nk; c++ ) {
+      fr.rep[c] = order[c].first;
+      newid[order[c].second] = c;
+    }
+    std::vector<std::pair<int64_t, int32_t> >().swap(order);
+    const int n_obs_i = n_obs;
+    #pragma omp parallel for schedule(static)
+    for ( int ipr = 0; ipr < n_obs_i; ipr++ ) {
+      int32_t* row = cls + static_cast<int64_t>(ipr) * n;
+      for ( int jm1 = 0; jm1 < n; jm1++ )
+        row[jm1] = newid[row[jm1]];
+    }
     fr.usable = true;
   }
   fr.classify_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
