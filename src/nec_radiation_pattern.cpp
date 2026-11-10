@@ -74,6 +74,25 @@ nec_radiation_pattern::nec_radiation_pattern(int in_n_theta, int in_n_phi,
   _e_theta.resize(n_theta, n_phi);
   _e_phi.resize(n_theta, n_phi);
   _e_r.resize(n_theta, n_phi);
+
+  /* Zero everything: with power averaging only (RP XNDA A = 2) the
+   * calculation skips the per-point stores, yet the printout still reads
+   * them, and _polarization_sense_index indexes a 4-entry string table.
+   * Uninitialised, that read garbage (valgrind) and could segfault,
+   * depending on what the heap held. Zero is what a fresh heap printed. */
+  _gain.setConstant(0.0);
+  _power_gain_vert.setConstant(0.0);
+  _power_gain_horiz.setConstant(0.0);
+  _power_gain_tot.setConstant(0.0);
+  _power_gain_rhcp.setConstant(0.0);
+  _power_gain_lhcp.setConstant(0.0);
+  _polarization_axial_ratio.setConstant(0.0);
+  _polarization_tilt.setConstant(0.0);
+  _polarization_sense_index.setConstant(0);
+  _averaging_scales.setConstant(0.0);
+  _e_theta.setConstant(nec_complex(0.0, 0.0));
+  _e_phi.setConstant(nec_complex(0.0, 0.0));
+  _e_r.setConstant(nec_complex(0.0, 0.0));
   
   _ifar = in_ifar;
   _wavelength = in_wavelength;
