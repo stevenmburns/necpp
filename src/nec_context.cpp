@@ -2233,9 +2233,11 @@ inline uint64_t fill_hash(const fill_pair_key_g& k) {
    by make_key(ipr, jm1, key). Parallel, lock-free open addressing over
    8-byte slots (32-bit hash tag | class id); the full key is compared
    before a pair joins a class; each class's representative is its
-   least member. Returns false when more than cap classes appear. */
-template <class Key, class MakeKey>
-bool fill_classify(int n_obs, int n, int64_t cap, const MakeKey& make_key,
+   least member. make_row(ipr) returns a callable row(jm1, key) holding
+   whatever depends on the observer alone. Returns false when more than
+   cap classes appear. */
+template <class Key, class MakeRow>
+bool fill_classify(int n_obs, int n, int64_t cap, const MakeRow& make_row,
                    int32_t* cls, std::vector<int64_t>& rep_out, int64_t& count_out) {
   int64_t nslots = 1;
   while ( nslots < 2 * cap ) nslots <<= 1;
@@ -2258,10 +2260,11 @@ bool fill_classify(int n_obs, int n, int64_t cap, const MakeKey& make_key,
   #pragma omp parallel for schedule(dynamic, 8) default(shared)
   for ( int ipr = 0; ipr < n_obs; ipr++ ) {
     if ( overflow.load(std::memory_order_relaxed) ) continue;
+    const auto row = make_row(ipr);
     bool stop = false;
     for ( int jm1 = 0; jm1 < n && !stop; jm1++ ) {
       Key k;
-      make_key(ipr, jm1, k);
+      row(jm1, k);
       const uint64_t h = fill_hash(k);
       const uint64_t tag = ((h >> 32) | 1u) << 32;
       const int64_t p = static_cast<int64_t>(ipr) * n + jm1;
@@ -2423,56 +2426,73 @@ void nec_context::fill_reuse_prepare(int n_obs, const std::vector<cmww_source_da
   bool ok;
   if ( !over_ground ) {
     /* free space: unchanged from the free-space-only version */
-    auto make_key = [&](int ipr, int jm1, fill_pair_key& k) {
-      const nec_float xi = xu[ipr], yi = yu[ipr], zi = zu[ipr];
-      const nec_float cabi = cab[ipr], sabi = sab[ipr], salpi = salp[ipr];
-      const nec_float cj = cab[jm1], sj = sab[jm1], aj = salp[jm1];
-      const nec_float dx = xi - xu[jm1], dy = yi - yu[jm1], dz = zi - zu[jm1];
-      const nec_float zp = dx * cj + dy * sj + dz * aj;
-      const nec_float rx = dx - cj * zp, ry = dy - sj * zp, rz = dz - aj * zp;
-      k.t = (stype[jm1] << 32) | (otype[ipr] << 1) | (ipr == jm1 ? 1 : 0);
-      k.zp = fill_quant(zp, inv_q);
-      k.rho = fill_quant(std::sqrt(rx * rx + ry * ry + rz * rz), inv_q);
-      k.cax = fill_quant(cabi * cj + sabi * sj + salpi * aj, inv_qd);
-      k.crad = fill_quant(rx * cabi + ry * sabi + rz * salpi, inv_q);
+    /* raw pointers, captured by value: the per-pair body is the hot
+       loop, and it should not reload through the array objects */
+    const nec_float *px = &xu[0], *py = &yu[0], *pz = &zu[0];
+    const nec_float *pc = &cab[0], *ps = &sab[0], *pa = &salp[0];
+    const int64_t *pst = stype.data(), *pot = otype.data();
+    auto make_key = [=](int ipr) {
+      const nec_float xi = px[ipr], yi = py[ipr], zi = pz[ipr];
+      const nec_float cabi = pc[ipr], sabi = ps[ipr], salpi = pa[ipr];
+      const int64_t oty = pot[ipr] << 1;
+      return [=](int jm1, fill_pair_key& k) {
+        const nec_float cj = pc[jm1], sj = ps[jm1], aj = pa[jm1];
+        const nec_float dx = xi - px[jm1], dy = yi - py[jm1], dz = zi - pz[jm1];
+        const nec_float zp = dx * cj + dy * sj + dz * aj;
+        const nec_float rx = dx - cj * zp, ry = dy - sj * zp, rz = dz - aj * zp;
+        k.t = (pst[jm1] << 32) | oty | (ipr == jm1 ? 1 : 0);
+        k.zp = fill_quant(zp, inv_q);
+        k.rho = fill_quant(std::sqrt(rx * rx + ry * ry + rz * rz), inv_q);
+        k.cax = fill_quant(cabi * cj + sabi * sj + salpi * aj, inv_qd);
+        k.crad = fill_quant(rx * cabi + ry * sabi + rz * salpi, inv_q);
+      };
     };
     ok = fill_classify<fill_pair_key>(n_obs, n, cap, make_key, cls, rep, count);
   } else {
-    auto make_key = [&](int ipr, int jm1, fill_pair_key_g& k) {
-      const nec_float cj = cab[jm1], sj = sab[jm1];
-      const nec_float ci = cab[ipr], si = sab[ipr];
-      const nec_float dx = xu[ipr] - xu[jm1], dy = yu[ipr] - yu[jm1];
-      const nec_float hh = std::sqrt(dx * dx + dy * dy);
-      /* e1: the horizontal separation; for vertically stacked centres
-         (h exactly 0) the source's horizontal direction, else the
-         observer's, else x (both vertical: nothing then depends on e1).
-         Any rule that turns with the pair is valid; a noisy e1 at tiny
-         h only splits classes. */
-      nec_float e1x = 1.0, e1y = 0.0;
-      if ( hh > 0.0 ) { e1x = dx / hh; e1y = dy / hh; }
-      else {
-        const nec_float hj = std::sqrt(cj * cj + sj * sj);
-        const nec_float hi = std::sqrt(ci * ci + si * si);
-        if ( hj > 0.0 ) { e1x = cj / hj; e1y = sj / hj; }
-        else if ( hi > 0.0 ) { e1x = ci / hi; e1y = si / hi; }
-      }
-      /* e2 = z x e1 = (-e1y, e1x) */
-      k.t = (stype[jm1] << 32) | (otype[ipr] << 1) | (ipr == jm1 ? 1 : 0);
-      k.h = fill_quant(hh, inv_q);
-      k.zj = fill_quant(zu[jm1], inv_q);
-      k.zi = fill_quant(zu[ipr], inv_q);
-      k.dj1 = fill_quant(cj * e1x + sj * e1y, inv_qd);
-      k.dj2 = fill_quant(sj * e1x - cj * e1y, inv_qd);
-      k.dj3 = fill_quant(salp[jm1], inv_qd);
-      k.di1 = fill_quant(ci * e1x + si * e1y, inv_qd);
-      k.di2 = fill_quant(si * e1x - ci * e1y, inv_qd);
-      k.di3 = fill_quant(salp[ipr], inv_qd);
-      /* mirror in the vertical plane through e1 flips both e2 parts:
-         normalise them jointly, on the quantised values (exact) */
-      if ( k.dj2 < 0 || (k.dj2 == 0 && k.di2 < 0) ) {
-        k.dj2 = -k.dj2;
-        k.di2 = -k.di2;
-      }
+    const nec_float *px = &xu[0], *py = &yu[0], *pz = &zu[0];
+    const nec_float *pc = &cab[0], *ps = &sab[0], *pa = &salp[0];
+    const int64_t *pst = stype.data(), *pot = otype.data();
+    auto make_key = [=](int ipr) {
+      const nec_float xi = px[ipr], yi = py[ipr];
+      const nec_float ci = pc[ipr], si = ps[ipr];
+      const int64_t oty = pot[ipr] << 1;
+      const int64_t zi_q = fill_quant(pz[ipr], inv_q);
+      const int64_t di3_q = fill_quant(pa[ipr], inv_qd);
+      return [=](int jm1, fill_pair_key_g& k) {
+        const nec_float cj = pc[jm1], sj = ps[jm1];
+        const nec_float dx = xi - px[jm1], dy = yi - py[jm1];
+        const nec_float hh = std::sqrt(dx * dx + dy * dy);
+        /* e1: the horizontal separation; for vertically stacked centres
+           (h exactly 0) the source's horizontal direction, else the
+           observer's, else x (both vertical: nothing then depends on
+           e1). Any rule that turns with the pair is valid; a noisy e1
+           at tiny h only splits classes. */
+        nec_float e1x = 1.0, e1y = 0.0;
+        if ( hh > 0.0 ) { e1x = dx / hh; e1y = dy / hh; }
+        else {
+          const nec_float hj = std::sqrt(cj * cj + sj * sj);
+          const nec_float hi = std::sqrt(ci * ci + si * si);
+          if ( hj > 0.0 ) { e1x = cj / hj; e1y = sj / hj; }
+          else if ( hi > 0.0 ) { e1x = ci / hi; e1y = si / hi; }
+        }
+        /* e2 = z x e1 = (-e1y, e1x) */
+        k.t = (pst[jm1] << 32) | oty | (ipr == jm1 ? 1 : 0);
+        k.h = fill_quant(hh, inv_q);
+        k.zj = fill_quant(pz[jm1], inv_q);
+        k.zi = zi_q;
+        k.dj1 = fill_quant(cj * e1x + sj * e1y, inv_qd);
+        k.dj2 = fill_quant(sj * e1x - cj * e1y, inv_qd);
+        k.dj3 = fill_quant(pa[jm1], inv_qd);
+        k.di1 = fill_quant(ci * e1x + si * e1y, inv_qd);
+        k.di2 = fill_quant(si * e1x - ci * e1y, inv_qd);
+        k.di3 = di3_q;
+        /* a mirror in the vertical plane through e1 flips both e2
+           parts: normalise them jointly, on the quantised values */
+        if ( k.dj2 < 0 || (k.dj2 == 0 && k.di2 < 0) ) {
+          k.dj2 = -k.dj2;
+          k.di2 = -k.di2;
+        }
+      };
     };
     ok = fill_classify<fill_pair_key_g>(n_obs, n, cap, make_key, cls, rep, count);
   }
