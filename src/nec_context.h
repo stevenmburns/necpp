@@ -718,7 +718,8 @@ public:
       \param mode -1 : follow the PYNEC_FILL_REUSE environment variable
                         (0 = off, 1 = on; unset = the built-in default)
                    0  : off
-                   1  : on (free space only; any ground disables it)
+                   1  : on (free space, and perfect / reflection-coefficient /
+                        Sommerfeld grounds without a radial-wire screen)
   */
   void set_fill_reuse(int mode);
 
@@ -980,7 +981,7 @@ private:
   fill_reuse_state m_fill_reuse;
   int m_fill_reuse_mode; /* -1 env/default, 0 off, 1 on */
   bool fill_reuse_wanted();
-  void fill_reuse_prepare(int n_obs, const std::vector<cmww_source_data>& sd);
+  void fill_reuse_prepare(int n_obs, const std::vector<cmww_source_data>& sd, bool over_ground);
 
   /*! \brief A private convenience function called by ne_card() and nh_card()
   */

@@ -2141,9 +2141,29 @@ void nec_context::load()
    quadrature of the same integral, the same exposure the unmodified
    code has to rounding in the coordinates.
 
-   Ground (image or Sommerfeld/Norton) makes efld depend on the heights
-   and the absolute position; reuse is disabled whenever a ground is
-   present. Patches (cmws/cmsw) are untouched. */
+   Over a ground plane (z = 0) efld adds the image term (image source at
+   -z, direction (cab, sab, -salp)), scaled by the per-frequency frati;
+   a reflection-coefficient ground (GN 0) multiplies it by coefficients
+   of cth = (zi + zj) / r and the horizontal unit p perpendicular to the
+   separation (entering as (p.t) p, sign-free) with the per-frequency
+   zrati; Sommerfeld/Norton (GN 2) adds rom2/sflds over the source
+   segment, reading the horizontal offset from the integration point to
+   a displaced observation point, the height sum, the source's
+   horizontal direction, and tables global per frequency. All of that
+   is invariant under horizontal translations, rotations about z and
+   mirrors in vertical planes -- but not under vertical motion -- so
+   the ground key (fill_pair_key_g) is the pair geometry modulo those:
+   horizontal separation, both heights, both directions in the
+   separation frame with the e2 signs normalised jointly. Exceptions,
+   handled per frequency in cmset (unsafe classes, members evaluated
+   directly): every threshold branch the ground terms take (image
+   r = rkh, GN 0's xymag = 1e-6, GN 2's r^2 = 0.95, rh = 1e-10 and
+   dmin = 0.95), and GN 2's displaced point when the z part of d' x r
+   is within the guard of 0 -- its sign rule then follows rounding, or,
+   at exactly 0, does not mirror. The rh <= 1e-10 fallback, which uses
+   an absolute direction, implies that case. The radial-wire screen
+   reads the absolute distance from the origin: reuse stays off there.
+   Patches (cmws/cmsw) are untouched. */
 
 namespace {
 
@@ -2182,6 +2202,116 @@ inline int64_t fill_quant(nec_float v, nec_float inv_q) {
 const uint32_t FILL_SLOT_BUSY = 0xFFFFFFFFu;
 const uint32_t FILL_SLOT_OVF  = 0xFFFFFFFEu;
 
+/* The key over a ground: the pair's full geometry modulo the symmetries
+   a ground plane at z = 0 leaves, i.e. horizontal translations,
+   rotations about a vertical axis and mirrors in vertical planes. In a
+   frame (e1, e2, z) with e1 the horizontal direction from the source
+   centre to the observer centre and e2 = z x e1: the horizontal
+   separation h, both centre heights, both segment directions (e1, e2,
+   z components), the e2 signs normalised jointly so the two mirror
+   images share a class. */
+struct fill_pair_key_g {
+  int64_t t;     /* as fill_pair_key */
+  int64_t h, zj, zi;
+  int64_t dj1, dj2, dj3, di1, di2, di3;
+  bool operator==(const fill_pair_key_g& o) const {
+    return t == o.t && h == o.h && zj == o.zj && zi == o.zi
+      && dj1 == o.dj1 && dj2 == o.dj2 && dj3 == o.dj3
+      && di1 == o.di1 && di2 == o.di2 && di3 == o.di3;
+  }
+};
+
+inline uint64_t fill_hash(const fill_pair_key_g& k) {
+  uint64_t h = fill_mix64(static_cast<uint64_t>(k.t) + 0x9e3779b97f4a7c15ULL);
+  const int64_t v[9] = { k.h, k.zj, k.zi, k.dj1, k.dj2, k.dj3, k.di1, k.di2, k.di3 };
+  for ( int a = 0; a < 9; a++ )
+    h = fill_mix64(h ^ static_cast<uint64_t>(v[a]));
+  return h;
+}
+
+/* Classify every ordered pair p = ipr * n + jm1 (ipr < n_obs, jm1 < n)
+   by make_key(ipr, jm1, key). Parallel, lock-free open addressing over
+   8-byte slots (32-bit hash tag | class id); the full key is compared
+   before a pair joins a class; each class's representative is its
+   least member. Returns false when more than cap classes appear. */
+template <class Key, class MakeKey>
+bool fill_classify(int n_obs, int n, int64_t cap, const MakeKey& make_key,
+                   int32_t* cls, std::vector<int64_t>& rep_out, int64_t& count_out) {
+  int64_t nslots = 1;
+  while ( nslots < 2 * cap ) nslots <<= 1;
+  const uint64_t mask = static_cast<uint64_t>(nslots - 1);
+
+  std::unique_ptr<std::atomic<uint64_t>[]> slots(new std::atomic<uint64_t>[nslots]);
+  /* rep and keys are default-initialised (not zeroed): only the pages of
+     the classes actually created become resident. */
+  std::unique_ptr<std::atomic<int64_t>[]> rep(new std::atomic<int64_t>[cap]);
+  std::unique_ptr<Key[]> keys(new Key[cap]);
+  /* int loop indices throughout: MSVC's OpenMP 2.0 wants them, and
+     nslots <= 4 * cap < 2^30, classes < 2^31 since npairs < 2^31. */
+  const int nslots_i = static_cast<int>(nslots);
+  #pragma omp parallel for schedule(static)
+  for ( int s = 0; s < nslots_i; s++ )
+    slots[s].store(0, std::memory_order_relaxed);
+  std::atomic<int64_t> count(0);
+  std::atomic<bool> overflow(false);
+
+  #pragma omp parallel for schedule(dynamic, 8) default(shared)
+  for ( int ipr = 0; ipr < n_obs; ipr++ ) {
+    if ( overflow.load(std::memory_order_relaxed) ) continue;
+    bool stop = false;
+    for ( int jm1 = 0; jm1 < n && !stop; jm1++ ) {
+      Key k;
+      make_key(ipr, jm1, k);
+      const uint64_t h = fill_hash(k);
+      const uint64_t tag = ((h >> 32) | 1u) << 32;
+      const int64_t p = static_cast<int64_t>(ipr) * n + jm1;
+      uint64_t idx = h & mask;
+      for (;;) {
+        uint64_t v = slots[idx].load(std::memory_order_acquire);
+        if ( v == 0 ) {
+          const uint64_t busy = tag | FILL_SLOT_BUSY;
+          if ( slots[idx].compare_exchange_strong(v, busy, std::memory_order_acq_rel,
+                                                  std::memory_order_acquire) ) {
+            const int64_t c = count.fetch_add(1, std::memory_order_relaxed);
+            if ( c >= cap ) {
+              overflow.store(true, std::memory_order_relaxed);
+              slots[idx].store(tag | FILL_SLOT_OVF, std::memory_order_release);
+              stop = true;
+              break;
+            }
+            keys[c] = k;
+            rep[c].store(p, std::memory_order_relaxed);
+            slots[idx].store(tag | static_cast<uint64_t>(c), std::memory_order_release);
+            cls[p] = static_cast<int32_t>(c);
+            break;
+          }
+          /* lost the race: v now holds the winner's slot word */
+        }
+        if ( (v & 0xFFFFFFFF00000000ULL) == tag ) {
+          while ( static_cast<uint32_t>(v) == FILL_SLOT_BUSY )
+            v = slots[idx].load(std::memory_order_acquire);
+          const uint32_t c = static_cast<uint32_t>(v);
+          if ( c == FILL_SLOT_OVF ) { stop = true; break; }
+          if ( keys[c] == k ) { /* full-key confirmation */
+            cls[p] = static_cast<int32_t>(c);
+            int64_t cur = rep[c].load(std::memory_order_relaxed);
+            while ( p < cur && !rep[c].compare_exchange_weak(cur, p, std::memory_order_relaxed) ) {}
+            break;
+          }
+        }
+        idx = (idx + 1) & mask;
+      }
+    }
+  }
+  count_out = count.load();
+  if ( overflow.load() )
+    return false;
+  rep_out.resize(count_out);
+  for ( int64_t c = 0; c < count_out; c++ )
+    rep_out[c] = rep[c].load(std::memory_order_relaxed);
+  return true;
+}
+
 } /* namespace */
 
 void nec_context::set_fill_reuse(int mode) {
@@ -2211,7 +2341,7 @@ static bool fill_reuse_verify() {
 /* Classify every ordered (observer ipr < n_obs, source jm1) wire pair.
    Rebuilds only when the snapshot of what the key is derived from has
    changed since the last call. */
-void nec_context::fill_reuse_prepare(int n_obs, const std::vector<cmww_source_data>& sdv) {
+void nec_context::fill_reuse_prepare(int n_obs, const std::vector<cmww_source_data>& sdv, bool over_ground) {
   const int n = m_geometry->n_segments;
   const real_array& xu = m_geometry->get_x_unscaled();
   const real_array& yu = m_geometry->get_y_unscaled();
@@ -2224,10 +2354,11 @@ void nec_context::fill_reuse_prepare(int n_obs, const std::vector<cmww_source_da
   const bool use_exk = m_use_exk;
 
   std::vector<nec_float> snap;
-  snap.reserve(10 * static_cast<size_t>(n) + 3);
+  snap.reserve(10 * static_cast<size_t>(n) + 4);
   snap.push_back(n);
   snap.push_back(n_obs);
   snap.push_back(use_exk ? 1.0 : 0.0);
+  snap.push_back(over_ground ? 1.0 : 0.0);
   for ( int i = 0; i < n; i++ ) {
     snap.push_back(xu[i]); snap.push_back(yu[i]); snap.push_back(zu[i]);
     snap.push_back(su[i]); snap.push_back(bu[i]);
@@ -2285,99 +2416,78 @@ void nec_context::fill_reuse_prepare(int n_obs, const std::vector<cmww_source_da
      so a geometry with few repeats pays only part of one scan. */
   const int64_t cap = std::min<int64_t>(npairs / 2 + 1,
                                         std::max<int64_t>(int64_t(1) << 20, npairs / 8));
-  int64_t nslots = 1;
-  while ( nslots < 2 * cap ) nslots <<= 1;
-  const uint64_t mask = static_cast<uint64_t>(nslots - 1);
-
-  std::unique_ptr<std::atomic<uint64_t>[]> slots(new std::atomic<uint64_t>[nslots]);
-  /* rep and keys are default-initialised (not zeroed): only the pages of
-     the classes actually created become resident. */
-  std::unique_ptr<std::atomic<int64_t>[]> rep(new std::atomic<int64_t>[cap]);
-  std::unique_ptr<fill_pair_key[]> keys(new fill_pair_key[cap]);
-  /* int loop indices throughout: MSVC's OpenMP 2.0 wants them, and
-     nslots <= 4 * cap < 2^30, classes < 2^31 since npairs < 2^31. */
-  const int nslots_i = static_cast<int>(nslots);
-  #pragma omp parallel for schedule(static)
-  for ( int s = 0; s < nslots_i; s++ )
-    slots[s].store(0, std::memory_order_relaxed);
   fr.cls.resize(npairs);
   int32_t* cls = fr.cls.data();
-  std::atomic<int64_t> count(0);
-  std::atomic<bool> overflow(false);
-
-  #pragma omp parallel for schedule(dynamic, 8) default(shared)
-  for ( int ipr = 0; ipr < n_obs; ipr++ ) {
-    if ( overflow.load(std::memory_order_relaxed) ) continue;
-    const nec_float xi = xu[ipr], yi = yu[ipr], zi = zu[ipr];
-    const nec_float cabi = cab[ipr], sabi = sab[ipr], salpi = salp[ipr];
-    const int64_t oty = otype[ipr] << 1;
-    bool stop = false;
-    for ( int jm1 = 0; jm1 < n && !stop; jm1++ ) {
+  std::vector<int64_t> rep;
+  int64_t count = 0;
+  bool ok;
+  if ( !over_ground ) {
+    /* free space: unchanged from the free-space-only version */
+    auto make_key = [&](int ipr, int jm1, fill_pair_key& k) {
+      const nec_float xi = xu[ipr], yi = yu[ipr], zi = zu[ipr];
+      const nec_float cabi = cab[ipr], sabi = sab[ipr], salpi = salp[ipr];
       const nec_float cj = cab[jm1], sj = sab[jm1], aj = salp[jm1];
       const nec_float dx = xi - xu[jm1], dy = yi - yu[jm1], dz = zi - zu[jm1];
       const nec_float zp = dx * cj + dy * sj + dz * aj;
       const nec_float rx = dx - cj * zp, ry = dy - sj * zp, rz = dz - aj * zp;
-      fill_pair_key k;
-      k.t = (stype[jm1] << 32) | oty | (ipr == jm1 ? 1 : 0);
+      k.t = (stype[jm1] << 32) | (otype[ipr] << 1) | (ipr == jm1 ? 1 : 0);
       k.zp = fill_quant(zp, inv_q);
       k.rho = fill_quant(std::sqrt(rx * rx + ry * ry + rz * rz), inv_q);
       k.cax = fill_quant(cabi * cj + sabi * sj + salpi * aj, inv_qd);
       k.crad = fill_quant(rx * cabi + ry * sabi + rz * salpi, inv_q);
-      const uint64_t h = fill_hash(k);
-      const uint64_t tag = ((h >> 32) | 1u) << 32;
-      const int64_t p = static_cast<int64_t>(ipr) * n + jm1;
-      uint64_t idx = h & mask;
-      for (;;) {
-        uint64_t v = slots[idx].load(std::memory_order_acquire);
-        if ( v == 0 ) {
-          const uint64_t busy = tag | FILL_SLOT_BUSY;
-          if ( slots[idx].compare_exchange_strong(v, busy, std::memory_order_acq_rel,
-                                                  std::memory_order_acquire) ) {
-            const int64_t c = count.fetch_add(1, std::memory_order_relaxed);
-            if ( c >= cap ) {
-              overflow.store(true, std::memory_order_relaxed);
-              slots[idx].store(tag | FILL_SLOT_OVF, std::memory_order_release);
-              stop = true;
-              break;
-            }
-            keys[c] = k;
-            rep[c].store(p, std::memory_order_relaxed);
-            slots[idx].store(tag | static_cast<uint64_t>(c), std::memory_order_release);
-            cls[p] = static_cast<int32_t>(c);
-            break;
-          }
-          /* lost the race: v now holds the winner's slot word */
-        }
-        if ( (v & 0xFFFFFFFF00000000ULL) == tag ) {
-          while ( static_cast<uint32_t>(v) == FILL_SLOT_BUSY )
-            v = slots[idx].load(std::memory_order_acquire);
-          const uint32_t c = static_cast<uint32_t>(v);
-          if ( c == FILL_SLOT_OVF ) { stop = true; break; }
-          if ( keys[c] == k ) { /* full-key confirmation */
-            cls[p] = static_cast<int32_t>(c);
-            int64_t cur = rep[c].load(std::memory_order_relaxed);
-            while ( p < cur && !rep[c].compare_exchange_weak(cur, p, std::memory_order_relaxed) ) {}
-            break;
-          }
-        }
-        idx = (idx + 1) & mask;
+    };
+    ok = fill_classify<fill_pair_key>(n_obs, n, cap, make_key, cls, rep, count);
+  } else {
+    auto make_key = [&](int ipr, int jm1, fill_pair_key_g& k) {
+      const nec_float cj = cab[jm1], sj = sab[jm1];
+      const nec_float ci = cab[ipr], si = sab[ipr];
+      const nec_float dx = xu[ipr] - xu[jm1], dy = yu[ipr] - yu[jm1];
+      const nec_float hh = std::sqrt(dx * dx + dy * dy);
+      /* e1: the horizontal separation; for vertically stacked centres
+         (h exactly 0) the source's horizontal direction, else the
+         observer's, else x (both vertical: nothing then depends on e1).
+         Any rule that turns with the pair is valid; a noisy e1 at tiny
+         h only splits classes. */
+      nec_float e1x = 1.0, e1y = 0.0;
+      if ( hh > 0.0 ) { e1x = dx / hh; e1y = dy / hh; }
+      else {
+        const nec_float hj = std::sqrt(cj * cj + sj * sj);
+        const nec_float hi = std::sqrt(ci * ci + si * si);
+        if ( hj > 0.0 ) { e1x = cj / hj; e1y = sj / hj; }
+        else if ( hi > 0.0 ) { e1x = ci / hi; e1y = si / hi; }
       }
-    }
+      /* e2 = z x e1 = (-e1y, e1x) */
+      k.t = (stype[jm1] << 32) | (otype[ipr] << 1) | (ipr == jm1 ? 1 : 0);
+      k.h = fill_quant(hh, inv_q);
+      k.zj = fill_quant(zu[jm1], inv_q);
+      k.zi = fill_quant(zu[ipr], inv_q);
+      k.dj1 = fill_quant(cj * e1x + sj * e1y, inv_qd);
+      k.dj2 = fill_quant(sj * e1x - cj * e1y, inv_qd);
+      k.dj3 = fill_quant(salp[jm1], inv_qd);
+      k.di1 = fill_quant(ci * e1x + si * e1y, inv_qd);
+      k.di2 = fill_quant(si * e1x - ci * e1y, inv_qd);
+      k.di3 = fill_quant(salp[ipr], inv_qd);
+      /* mirror in the vertical plane through e1 flips both e2 parts:
+         normalise them jointly, on the quantised values (exact) */
+      if ( k.dj2 < 0 || (k.dj2 == 0 && k.di2 < 0) ) {
+        k.dj2 = -k.dj2;
+        k.di2 = -k.di2;
+      }
+    };
+    ok = fill_classify<fill_pair_key_g>(n_obs, n, cap, make_key, cls, rep, count);
   }
 
-  if ( overflow.load() ) {
+  if ( !ok ) {
     std::vector<int32_t>().swap(fr.cls);
   } else {
     /* Renumber classes in order of their representative (least member),
        so ids, and the triple table's layout, are deterministic and
        follow the observer-major scan the fill makes. */
-    const int nk = static_cast<int>(count.load());
-    keys.reset();
-    slots.reset();
+    const int nk = static_cast<int>(count);
     std::vector<std::pair<int64_t, int32_t> > order(nk);
     for ( int c = 0; c < nk; c++ )
-      order[c] = std::make_pair(rep[c].load(std::memory_order_relaxed), static_cast<int32_t>(c));
-    rep.reset();
+      order[c] = std::make_pair(rep[c], static_cast<int32_t>(c));
+    std::vector<int64_t>().swap(rep);
     std::sort(order.begin(), order.end());
     std::vector<int32_t> newid(nk);
     fr.rep.resize(nk);
@@ -2397,9 +2507,10 @@ void nec_context::fill_reuse_prepare(int n_obs, const std::vector<cmww_source_da
   }
   fr.classify_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   if ( std::getenv("PYNEC_FILL_TIMING") )
-    std::fprintf(stderr, "[pynec] fill-reuse classify: %s, %lld pairs, %lld classes (cap %lld), %.3f s, %d src types, q=%.3g m\n",
+    std::fprintf(stderr, "[pynec] fill-reuse classify (%s): %s, %lld pairs, %lld classes (cap %lld), %.3f s, %d src types, q=%.3g m\n",
+      over_ground ? "ground key" : "free-space key",
       fr.usable ? "ok" : "over cap, reuse off", static_cast<long long>(npairs),
-      static_cast<long long>(fr.usable ? (long long)fr.rep.size() : (long long)count.load()),
+      static_cast<long long>(fr.usable ? (long long)fr.rep.size() : (long long)count),
       static_cast<long long>(cap), fr.classify_seconds,
       static_cast<int>(*std::max_element(stype.begin(), stype.end()) + 1), q);
 }
@@ -2552,13 +2663,21 @@ void nec_context::cmset( int64_t nrow, complex_array& in_cm, nec_float rkhx) {
       }
     }
 
-    /* Fill-pair reuse (see fill_reuse_prepare): free space only. */
+    /* Fill-pair reuse (see fill_reuse_prepare). Free space, and a
+     * perfect, reflection-coefficient or Sommerfeld/Norton ground
+     * without a radial-wire screen (the screen reads the absolute
+     * distance from the origin, which no pair key can carry). */
     const bool timing = std::getenv("PYNEC_FILL_TIMING") != nullptr;
     const auto tfill0 = std::chrono::steady_clock::now();
-    bool use_reuse = (i1 == 1) && fill_reuse_wanted()
-        && !ground.present() && !ground.type_sommerfeld_norton();
+    const bool over_ground = ground.present();
+    const bool ground_ok = over_ground
+        ? ( ground.get_radial_wire_count() == 0
+            && ( ground.type_perfect() || ground.type_finite_reflection()
+                 || ground.type_sommerfeld_norton() ) )
+        : !ground.type_sommerfeld_norton();
+    bool use_reuse = (i1 == 1) && fill_reuse_wanted() && ground_ok;
     if ( use_reuse ) {
-      fill_reuse_prepare(static_cast<int>(in2), source_data);
+      fill_reuse_prepare(static_cast<int>(in2), source_data, over_ground);
       use_reuse = m_fill_reuse.usable;
     }
     m_fill_reuse.last_classes = use_reuse ? static_cast<int64_t>(m_fill_reuse.rep.size()) : -1;
@@ -2607,7 +2726,47 @@ void nec_context::cmset( int64_t nrow, complex_array& in_cm, nec_float rkhx) {
         const nec_float zp = xij * cabj + yij * sabj + zij * salpj;
         const nec_float rhx = xij - cabj * zp, rhy = yij - sabj * zp, rhz = zij - salpj * zp;
         const nec_float r = std::sqrt(zp * zp + rhx * rhx + rhy * rhy + rhz * rhz + ai * ai);
-        fr.unsafe[c] = (std::fabs(r - rkh) <= guard) ? 1 : 0;
+        bool unsafe = std::fabs(r - rkh) <= guard;
+
+        if ( over_ground ) {
+          /* every branch efld's ground terms take on a threshold, as
+           * efld computes it; a representative near one marks its
+           * class for member-by-member evaluation this frequency */
+          const nec_float zimg = zi + zj;          /* height sum */
+          const nec_float salpr = -salpj;          /* image direction */
+          const nec_float zpi = xij * cabj + yij * sabj + zimg * salpr;
+          const nec_float rix = xij - cabj * zpi, riy = yij - sabj * zpi, riz = zimg - salpr * zpi;
+          const nec_float ri = std::sqrt(zpi * zpi + rix * rix + riy * riy + riz * riz + ai * ai);
+          unsafe = unsafe || std::fabs(ri - rkh) <= guard;          /* image lumped switch */
+          if ( ground.type_finite_reflection() ) {
+            const nec_float xymag = std::sqrt(xij * xij + yij * yij);
+            unsafe = unsafe || std::fabs(xymag - 1.0e-6) <= guard;  /* stacked: p undefined */
+          }
+          if ( ground.type_sommerfeld_norton() ) {
+            /* displaced observation point: d' x r, its sign rule on the
+             * z part, and the rh <= 1e-10 fallback, which uses an
+             * absolute direction */
+            const nec_float dpx = sabj * zimg - salpr * yij;
+            const nec_float dpy = salpr * xij - cabj * zimg;
+            const nec_float dpz = cabj * yij - sabj * xij;
+            const nec_float dpn = std::sqrt(dpx * dpx + dpy * dpy + dpz * dpz);
+            unsafe = unsafe || dpn <= 1.0e-5 + guard;
+            /* z part ~0: the sign is rounding noise, or exactly 0 and
+             * the displacement then turns the wrong way under a mirror */
+            unsafe = unsafe || std::fabs(dpz) <= guard;
+            const nec_float rr = xij * xij + yij * yij + zimg * zimg;
+            const nec_float rs = std::sqrt(rr);
+            unsafe = unsafe || std::fabs(rs - std::sqrt(0.95)) <= guard;  /* rom2 vs Norton */
+            if ( rr > 0.95 ) {
+              const nec_float rh3 = rr - zpi * zpi;
+              const nec_float rh3s = std::sqrt(std::max(rh3, nec_float(0)));
+              unsafe = unsafe || std::fabs(rh3s - 1.0e-5) <= guard;
+              const nec_float dmin = (rh3 <= 1.0e-10) ? 0.0 : std::sqrt(rh3 / (rh3 + ai * ai));
+              unsafe = unsafe || std::fabs(dmin - 0.95) <= guard / ai + 1.0e-12;  /* thin-wire blend */
+            }
+          }
+        }
+        fr.unsafe[c] = unsafe ? 1 : 0;
       }
       const auto teval1 = std::chrono::steady_clock::now();
 
