@@ -708,6 +708,23 @@ public:
   
   /*! "ek" card,  extended thin wire kernel option */
   void set_extended_thin_wire_kernel(bool ekflag);
+
+  /*! Fill-pair reuse for the wire-wire matrix fill.
+
+      Segment pairs related by a rigid motion produce the same field
+      triple; with reuse on, cmset() evaluates efld() once per distinct
+      pair class and scatters the stored triple for every member.
+
+      \param mode -1 : follow the PYNEC_FILL_REUSE environment variable
+                        (0 = off, 1 = on; unset = the built-in default)
+                   0  : off
+                   1  : on (free space only; any ground disables it)
+  */
+  void set_fill_reuse(int mode);
+
+  /*! Number of pair classes in the current classification, or -1 when
+      the last fill did not use reuse. */
+  int64_t get_fill_reuse_classes() const;
   
   
   /*! "cp" card, maximum coupling between antennas */
@@ -941,6 +958,29 @@ private:
     std::vector<nec_float> ax, bx, cx;
   };
   std::vector<cmww_source_data> m_cmset_source_data;
+
+  /*! \brief Fill-pair reuse state (see set_fill_reuse()).
+   *
+   * Built once per geometry (in metres, so it holds for every
+   * frequency), checked against a snapshot of the geometry at every
+   * cmset() call and rebuilt when anything it was derived from moved. */
+  struct fill_reuse_state {
+    bool built = false;          /* a classification exists for snapshot */
+    bool usable = false;         /* ... and it fitted within the cap */
+    int n_src = 0, n_obs = 0;
+    std::vector<nec_float> snapshot;
+    std::vector<int32_t> cls;    /* class id per (observer ipr, source jm1) */
+    std::vector<int64_t> rep;    /* per class: ipr * n_src + jm1, the least member */
+    nec_float q_len = 0.0;       /* length quantum, metres */
+    std::vector<nec_complex> tri;      /* per class: etk, ets, etc */
+    std::vector<unsigned char> unsafe; /* per class: evaluate members directly */
+    double classify_seconds = 0.0;
+    int64_t last_classes = -1;
+  };
+  fill_reuse_state m_fill_reuse;
+  int m_fill_reuse_mode; /* -1 env/default, 0 off, 1 on */
+  bool fill_reuse_wanted();
+  void fill_reuse_prepare(int n_obs, const std::vector<cmww_source_data>& sd);
 
   /*! \brief A private convenience function called by ne_card() and nh_card()
   */

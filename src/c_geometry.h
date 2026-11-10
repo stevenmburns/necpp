@@ -202,6 +202,13 @@ public:
     return n_segments + m;
   }
   int n_plus_2m, n_plus_3m; /* n+m,n+2m,n+3m */
+
+  /* Read-only views of the geometry in metres (before frequency_scale()). */
+  const real_array& get_x_unscaled() const { return x_unscaled; }
+  const real_array& get_y_unscaled() const { return y_unscaled; }
+  const real_array& get_z_unscaled() const { return z_unscaled; }
+  const real_array& get_si_unscaled() const { return si_unscaled; }
+  const real_array& get_bi_unscaled() const { return bi_unscaled; }
 private:
   //	The geometry data measured in meters is stored in these arrays
   //	and the x,y,z,si,bi arrays are then scaled for each frequency
