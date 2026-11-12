@@ -3,7 +3,10 @@ name: cli-release
 # Build the nec2++ command-line executables (BUILD-CLI.md) for two engine
 # variants on Linux and Windows, smoke-test them, and upload zips.
 #
-#   workflow_dispatch  -> workflow ARTIFACTS only (never a release)
+#   workflow_dispatch  -> workflow ARTIFACTS only (never a release). GitHub
+#                        only offers it once this file is on the default
+#                        branch; until then a push to cli-build runs it:
+#   push to cli-build  -> the same, artifacts only
 #   push of a cli-v* tag -> the same, plus a GitHub release with the zips,
 #                          but only if the tag push is the trigger AND the
 #                          repository variable CLI_RELEASE_ENABLED is "true".
@@ -16,6 +19,7 @@ name: cli-release
 on:
   workflow_dispatch:
   push:
+    branches: [cli-build]
     tags: ["cli-v*"]
 
 permissions:
