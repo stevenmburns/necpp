@@ -1,0 +1,180 @@
+name: cli-release
+
+# Build the nec2++ command-line executables (BUILD-CLI.md) for two engine
+# variants on Linux and Windows, smoke-test them, and upload zips.
+#
+#   workflow_dispatch  -> workflow ARTIFACTS only (never a release)
+#   push of a cli-v* tag -> the same, plus a GitHub release with the zips,
+#                          but only if the tag push is the trigger AND the
+#                          repository variable CLI_RELEASE_ENABLED is "true".
+#                          (Publishing is the maintainer's decision: set the
+#                          variable, then push the tag.)
+#
+# Each variant builds a FIXED necpp commit (below), with this branch's
+# scripts/ applied on top.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["cli-v*"]
+
+permissions:
+  contents: read
+
+env:
+  # pynec-accel 1.7.6's necpp_src (python-necpp v1.7.6)
+  NECPP_ACCEL_COMMIT: a08a0d980cf9d7e3c1b327675bf17713ab2ac241
+  # fill-pair reuse (python-necpp feat/fill-pair-reuse's necpp_src)
+  NECPP_REUSE_COMMIT: 62dacd44bc4d76c37e5164000d11ee1ac68c1a81
+  # the scipy-openblas32 the pynec-accel 1.7.6 Windows wheels bundle
+  SCIPY_OPENBLAS32: "0.3.34.0.0"
+
+jobs:
+  build:
+    name: ${{ matrix.variant }} / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [accel, reuse]
+        os: [linux, windows]
+    runs-on: ${{ matrix.os == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the build scripts (this ref)
+        uses: actions/checkout@v4
+        with:
+          path: cli
+      - name: Check out the necpp commit this variant builds
+        uses: actions/checkout@v4
+        with:
+          path: necpp-src
+          ref: ${{ matrix.variant == 'reuse' && env.NECPP_REUSE_COMMIT || env.NECPP_ACCEL_COMMIT }}
+
+      # ---------------- Linux: gcc 14 in ubuntu:24.04, fully static ----------
+      - name: Cache OpenBLAS (Linux)
+        if: matrix.os == 'linux'
+        uses: actions/cache@v4
+        with:
+          path: work/openblas-0.3.34
+          key: openblas-0.3.34-ubuntu24.04-gcc14-${{ hashFiles('cli/scripts/build_cli.py') }}
+      - name: Build (Linux, in ubuntu:24.04)
+        if: matrix.os == 'linux'
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w -e HOST_UID="$(id -u)" ubuntu:24.04 bash -euo pipefail -c '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq gcc-14 g++-14 make patch git python3 binutils file ca-certificates >/dev/null
+            git config --global --add safe.directory "*"
+            CC=gcc-14 CXX=g++-14 python3 cli/scripts/build_cli.py --variant ${{ matrix.variant }} \
+              --src necpp-src --out out --work work --openblas-prefix work/openblas-0.3.34 --jobs 4
+            chown -R "$HOST_UID" out work'
+          file out/*
+          ldd out/nec2++-* || true
+
+      # ---------------- Windows: MSVC + scipy-openblas32 ----------------------
+      - name: Set up Python (Windows)
+        if: matrix.os == 'windows'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: MSVC developer environment (Windows)
+        if: matrix.os == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Build (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          python -m pip install "scipy-openblas32==$SCIPY_OPENBLAS32"
+          python cli/scripts/build_cli.py --variant ${{ matrix.variant }} \
+            --src necpp-src --out out --work work --jobs 4
+          # vcomp140.dll (MSVC OpenMP runtime, redistributable) ships beside the exe.
+          vcomp="$(find "$(cygpath -u "$VCToolsRedistDir")" -ipath '*x64*OpenMP*' -iname vcomp140.dll | grep -iv -e onecore -e debug | head -1)"
+          test -n "$vcomp"
+          cp "$vcomp" out/
+          # Imports: only Windows system DLLs, or DLLs shipped beside the exe
+          # (missing Microsoft runtime DLLs are copied in from the redist tree).
+          python cli/scripts/check_imports.py out --redist "$VCToolsRedistDir"
+
+      # ---------------- smoke test: both engine copies -----------------------
+      - name: Smoke test (auto dispatch, baseline forced, avx2 forced)
+        run: |
+          py=python3; [ "${{ matrix.os }}" = windows ] && py=python
+          exe="$(ls out/nec2++-* | grep -v -i '\.dll$' | head -1)"
+          echo "EXE=$exe" >> "$GITHUB_ENV"; echo "PY=$py" >> "$GITHUB_ENV"
+          "$exe" -v
+          "$exe" -b | tail -3
+          $py cli/scripts/smoke/check.py --exe "$exe" --engine auto
+          $py cli/scripts/smoke/check.py --exe "$exe" --engine baseline
+          $py cli/scripts/smoke/check.py --exe "$exe" --engine avx2
+      - name: Baseline copy on an SSE-only CPU (Linux, qemu-user -cpu Westmere)
+        # qemu's decoder raises #UD on any VEX (AVX/AVX2/FMA) instruction when
+        # the emulated CPU lacks AVX, so this proves the auto-dispatched
+        # baseline path never executes one. cpuid there also reports no
+        # x86-64-v3, so the dispatcher must pick the baseline by itself.
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user >/dev/null
+          cat > /tmp/qnec <<EOF
+          #!/bin/sh
+          exec qemu-x86_64 -cpu Westmere "$PWD/$EXE" "\$@"
+          EOF
+          chmod +x /tmp/qnec
+          NECPP_ENGINE_VERBOSE=1 /tmp/qnec -v
+          python3 cli/scripts/smoke/check.py --exe /tmp/qnec --engine auto | tee /tmp/q.log
+          grep -q "engine: baseline" /tmp/q.log
+          if NECPP_ENGINE=avx2 /tmp/qnec -v; then echo "avx2 forced on a CPU without it must refuse"; exit 1; fi
+      - name: Compare with the matching pynec-accel wheel (Linux)
+        # accel = pynec-accel 1.7.6's engine; reuse = 1.7.7's (62dacd4), whose
+        # reuse is opt-in there, so PYNEC_FILL_REUSE=1 turns it on for PyNEC.
+        if: matrix.os == 'linux'
+        run: |
+          if [ "${{ matrix.variant }}" = reuse ]; then pin=1.7.7; export PYNEC_FILL_REUSE=1; else pin=1.7.6; fi
+          python3 -m venv /tmp/pynec && /tmp/pynec/bin/pip install -q "pynec-accel==$pin"
+          /tmp/pynec/bin/python cli/scripts/smoke/check.py --exe "$EXE" --engine baseline --pynec
+          /tmp/pynec/bin/python cli/scripts/smoke/check.py --exe "$EXE" --engine avx2 --pynec
+
+      # ---------------- package ----------------------------------------------
+      - name: Package
+        id: pkg
+        run: |
+          base="$(basename "$EXE" .exe)"
+          mkdir -p "pkg/$base"
+          cp out/* "pkg/$base/"
+          cp necpp-src/COPYING "pkg/$base/COPYING-necpp-GPL-2.0.txt"
+          cp cli/scripts/licenses/OpenBLAS-LICENSE.txt "pkg/$base/"
+          if [ "${{ matrix.os }}" = windows ]; then
+            cp cli/scripts/licenses/MSVC-redist-NOTICE.txt "pkg/$base/"
+          fi
+          $PY cli/scripts/make_readme.py --variant ${{ matrix.variant }} --os ${{ matrix.os }} \
+            --necpp-commit "$(git -C necpp-src rev-parse HEAD)" --cli-commit "$(git -C cli rev-parse HEAD)" \
+            --exe "$EXE" > "pkg/$base/README.txt"
+          cd pkg
+          if [ "${{ matrix.os }}" = windows ]; then 7z a -bd "$base.zip" "$base" >/dev/null; else zip -qr "$base.zip" "$base"; fi
+          ls -la . "$base"
+          echo "name=$base" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: pkg/${{ steps.pkg.outputs.name }}.zip
+          if-no-files-found: error
+
+  release:
+    # Only on a cli-v* tag push, and only when the maintainer has opted in.
+    if: startsWith(github.ref, 'refs/tags/cli-v') && vars.CLI_RELEASE_ENABLED == 'true'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          draft: true

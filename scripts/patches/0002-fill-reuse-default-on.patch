@@ -1,0 +1,13 @@
+diff --git a/src/nec_context.cpp b/src/nec_context.cpp
+index e0bf379..e5a6e71 100644
+--- a/src/nec_context.cpp
++++ b/src/nec_context.cpp
+@@ -2169,7 +2169,7 @@ namespace {
+ 
+ /* Built-in default when neither set_fill_reuse() nor PYNEC_FILL_REUSE
+    says otherwise. */
+-const int FILL_REUSE_DEFAULT = 0;
++const int FILL_REUSE_DEFAULT = 1;
+ 
+ struct fill_pair_key {
+   int64_t t;     /* source type << 32 | observer type << 1 | self */

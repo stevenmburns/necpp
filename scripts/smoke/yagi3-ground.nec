@@ -1,0 +1,12 @@
+CM 3-element Yagi, 10 m above Sommerfeld ground, 5 frequencies
+CM (nec2++ CLI smoke test: multi-frequency, GN 2)
+CE
+GW 1 21 -2.0 -5.30 10.0 -2.0 5.30 10.0 0.006
+GW 2 21  0.0 -5.05 10.0  0.0 5.05 10.0 0.006
+GW 3 21  1.8 -4.75 10.0  1.8 4.75 10.0 0.006
+GE 1
+GN 2 0 0 0 13 0.005
+EX 0 2 11 0 1 0
+FR 0 5 0 0 13.9 0.2
+RP 0 10 1 1000 0 0 9 0
+EN

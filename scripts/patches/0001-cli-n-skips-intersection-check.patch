@@ -1,0 +1,57 @@
+diff --git a/src/misc.cpp b/src/misc.cpp
+index 53e3889..4f3ab19 100644
+--- a/src/misc.cpp
++++ b/src/misc.cpp
+@@ -21,6 +21,7 @@ void usage(void)
+       "usage: nec2++ [-i<input-file-name>] [-o<output-file-name>]"
+       "\n       -g: print maximum gain to stdout."
+       "\n       -b: Perform NEC++ Benchmark."
++      "\n       -n: skip the wire-intersection check (NEC-2 does not make it)."
+       "\n       -s: print result summary to standard output."
+       "\n       -c: print results in comma-separated-value (CSV) format,"
+       "\n           this options is used in conjunction with (-s) above."
+diff --git a/src/nec2cpp.cpp b/src/nec2cpp.cpp
+index 4d077a5..6b0fa9b 100644
+--- a/src/nec2cpp.cpp
++++ b/src/nec2cpp.cpp
+@@ -105,6 +105,7 @@ int main( int argc, char **argv )
+  		s_output.line(" Unknown exception");
+ 		exit(1);
+ 	}
++	return 0; /* explicit: the dispatch build renames main (scripts/build_cli.py) */
+ }
+ 
+ #include "c_geometry.h"
+@@ -198,11 +199,12 @@ int nec_main( int argc, char **argv, nec_output_file& s_output )
+ 	}
+ 
+ 	bool summary_to_stdout = false;
++	bool check_intersections = true;
+ 	// allocate a new nec_context;
+ 	nec_context s_context;
+ 
+ 	/* process command line options */
+-	while( (option = XGetopt(argc, argv, "i:o:hvscxgb") ) != -1 )
++	while( (option = XGetopt(argc, argv, "i:o:hvscxgbn") ) != -1 )
+ 	{
+ 		switch( option )
+ 		{
+@@ -242,6 +244,10 @@ int nec_main( int argc, char **argv, nec_output_file& s_output )
+ #endif
+ 			exit(0);
+ 
++		case 'n' : /* skip the wire-intersection check, as NEC-2 does */
++			check_intersections = false;
++			break;
++
+ 		case 'b' : /* Run benchmark */
+ 			benchmark();
+ 			exit(0);
+@@ -368,6 +374,7 @@ int nec_main( int argc, char **argv, nec_output_file& s_output )
+ 
+ 		/* set up geometry data in subroutine parse_geometry */
+ 		c_geometry* geo = s_context.get_geometry();
++		geo->set_intersection_check(check_intersections);
+ 		geo->parse_geometry(&s_context, input_fp);
+ 
+ 		s_context.calc_prepare();

@@ -1,0 +1,37 @@
+diff --git a/src/math_util.h b/src/math_util.h
+index 51a06cc..25ceebc 100644
+--- a/src/math_util.h
++++ b/src/math_util.h
+@@ -24,6 +24,12 @@
+  
+ #include "common.h"
+ 
++/* The namespace the engine is compiled in: empty (the global one) except in
++   the command line's two-copy CPU-dispatch build (scripts/build_cli.py). */
++#ifndef NECPP_NS
++#define NECPP_NS
++#endif
++
+ 
+ /*! \brief      Use the Eigen package for arrays 
+     \todo Work through how this should be done.
+@@ -225,16 +231,16 @@ public:
+   
+   /**!\brief The Euclidian norm */
+   inline nec_float norm() const {
+-    return ::norm(_v[0], _v[1], _v[2]);
++    return NECPP_NS::norm(_v[0], _v[1], _v[2]);
+   }
+   
+   inline nec_float norm2() const {
+-    return ::norm2(_v[0], _v[1], _v[2]);
++    return NECPP_NS::norm2(_v[0], _v[1], _v[2]);
+   }
+   
+   /**!\brief The L1-distance (often called the Manhattan norm) */
+   inline nec_float normL1() const {
+-    return ::normL1(_v[0], _v[1], _v[2]);
++    return NECPP_NS::normL1(_v[0], _v[1], _v[2]);
+   }
+   
+   inline nec_3vector& operator=(const nec_3vector& copy) {
