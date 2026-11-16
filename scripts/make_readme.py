@@ -43,33 +43,79 @@ def main() -> None:
                    "  OPENBLAS_NUM_THREADS sets OpenBLAS's alone.")
     exe = a.exe.name
     if win:
-        fournec2 = f"""
-4nec2
-  This exe can stand in for 4nec2's NEC-2 engine directly, with no shim. 4nec2
-  runs one of nec2dxs500.exe, nec2dxs1K5.exe, nec2dxs3k0.exe, nec2dxs5k0.exe,
-  nec2dxs8k0.exe and nec2dxs11k.exe (by deck size) from its exe folder, so
-  install a copy under each name:
+        this_build = ("MSVC: the exe plus libscipy_openblas.dll and vcomp140.dll."
+                      if a.os == "windows" else
+                      "MinGW: one self-contained exe, nothing else needed.")
+        guide = f"""
+1. USING NEC2++ WITH 4NEC2
+--------------------------
+What it is
+  nec2++ is a NEC-2 engine whose matrix fill runs on all your CPU cores and
+  whose matrix solve uses OpenBLAS. It installs under 4nec2's own engine names
+  (nec2dxs500.exe ... nec2dxs11k.exe), so 4nec2 runs it with no extra program
+  in between, and 4nec2's pattern, SWR and run-time displays work as usual.
 
-    install-4nec2.cmd C:\\4nec2\\exe
+Which Windows build
+  There are two zips:
+    MSVC   ...-windows-x86_64.zip        exe + libscipy_openblas.dll + vcomp140.dll.
+                                         Usually the faster one.
+    MinGW  ...-windows-mingw-x86_64.zip  a single self-contained exe.
+                                         Slower on some decks.
+  Choose MSVC for speed, MinGW if you want just one file.
+  This zip: {this_build}
 
-  backs up any existing nec2dxs*.exe to <folder>\\nec2dxs-backup-<date>\\ and
-  copies {exe}{" and the DLLs beside it" if a.os == "windows" else ""} there under the six names.
-  Copies rather than one file: the zip stays one exe instead of six identical
-  ones. The names are what matter; the exe does not care which it runs as.
+Install
+  1. Close 4nec2. Unzip this folder anywhere.
+  2. Open a Command Prompt in the unzipped folder and run
+       install-4nec2.cmd C:\\4nec2\\exe
+     (use your own 4nec2 exe folder if it is somewhere else).
+  It first copies 4nec2's existing engines (every nec2dxs*.exe in that
+  folder) into a new folder beside them, C:\\4nec2\\exe\\nec2dxs-backup-<date>\\,
+  then installs nec2++ under all six engine names.{" It also copies its two" + chr(10) + "  DLLs into C:\\4nec2\\exe, next to 4nec2.exe. They do no harm if you later" + chr(10) + "  switch to the other build or back to 4nec2's own engine." if a.os == "windows" else ""}
+  3. Start 4nec2 and run a model as usual.
 
-  Started with no -i, nec2++ takes the input and output names from, in order:
-  two arguments ({exe} in.nec out.out); else two lines on stdin if stdin
-  is redirected; else the two lines of nec2d.tmp in the exe's own folder,
-  which 4nec2 writes before each run (paths relative to that folder). Names
-  are trimmed of blanks, CR/LF and surrounding double quotes. The
-  wire-intersection check is off in that mode, as with -n, and the printout
-  is in NEC-2D's layout (the card echo, section titles, input-parameter and
-  radiation-pattern tables, and the closing RUN TIME line 4nec2 needs);
-  -d gives the same layout from the command line. NECPP_VERBOSE=1 prints, on
-  stderr only, which source was used and the resolved names. Exit status 0
-  on success; a missing input prints a message on stderr and exits non-zero.
+Going back
+  Copy the files from C:\\4nec2\\exe\\nec2dxs-backup-<date>\\ back into
+  C:\\4nec2\\exe, replacing the nec2dxs*.exe there.
+
+Threads
+  By default nec2++ uses one thread per physical CPU core. To choose another
+  number, set OMP_NUM_THREADS (and, if you like, OPENBLAS_NUM_THREADS for the
+  solve) in the Command Prompt you start 4nec2 from, e.g.
+    set OMP_NUM_THREADS=4
+    C:\\4nec2\\exe\\4nec2.exe
+
+2. BENCHMARKING AGAINST NEC2/MP (OR 4NEC2'S OWN ENGINE)
+-------------------------------------------------------
+  - Run the same deck with each engine, at 4nec2's default settings.
+    Nothing tuned.
+  - Use the deck's own frequency and pattern settings. Do not re-type a sweep
+    in 4nec2, so that 4nec2 does not rewrite the deck.
+  - Read the time from the "RUN TIME =" line at the end of the output (F8):
+    that is the number 4nec2 shows.
+  - Take the best of 3 runs. Expect about 10-15 % spread from run to run.
+  - Set the Windows power mode to "Best performance" first. On our test it
+    changed NEC2/MP's time by about 30 %.
+  - No affinity or priority settings are needed. (If you want to experiment:
+    the engine inherits 4nec2's CPU affinity, so starting 4nec2 with
+    "start /affinity ..." limits the engine too.)
+
+  Results, i5-1240P laptop, 4nec2 defaults (seconds, best of 3):
+
+    deck                                       NEC2/MP   nec2++ MSVC   nec2++ MinGW
+    ELT whip (4,392 segments, 13 frequencies)    TBD         TBD           TBD
+    LogYag (65 frequencies)                      TBD         TBD           TBD
+
+"""
+        fournec2 = """
+4nec2 file names
+  Started with no -i, nec2++ takes the input and output names from two
+  arguments, else two lines on stdin, else nec2d.tmp beside the exe, and
+  prints in NEC-2D's layout (also with -d). NECPP_VERBOSE=1 shows on stderr
+  where the names came from. See BUILD-CLI.md in the source for details.
 """
     else:
+        guide = ""
         fournec2 = f"""
 4nec2 / nec2dxs file names
   Started with no -i, nec2++ takes the names as 4nec2 hands them to a
@@ -83,7 +129,7 @@ def main() -> None:
 
   {a.exe.name}
   sha256 {sha}
-
+{guide}
 What it is
   NEC2++ (GPL-2.0-or-later, Timothy C.A. Molteno and contributors) from the
   fork {REPO}, built with the same engine configuration as the pynec-accel

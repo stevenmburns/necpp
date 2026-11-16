@@ -372,6 +372,16 @@ violation, 0xC0000005) but runs on Linux. Its `LD 5 1 1 41` loads segments
 survive is the likely cause (not confirmed). The compare job counts it as
 refused by both.
 
+## The README in each zip
+
+`scripts/make_readme.py` writes each zip's `README.txt`. The Windows ones
+open with two sections written for 4nec2 users, not developers: **using
+nec2++ with 4nec2** (what it is, MSVC vs MinGW, `install-4nec2.cmd`, what it
+backs up and how to go back, threads) and **benchmarking against NEC2/MP**
+(default settings, the deck's own sweep, the `RUN TIME =` line, best of 3,
+"Best performance" power mode, a results table still marked TBD). A note to
+users can say "follow the README".
+
 ## Smoke test
 
 `scripts/smoke/check.py --exe <nec2++> [--engine baseline|avx2|auto] [--pynec]`
