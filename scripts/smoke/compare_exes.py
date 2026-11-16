@@ -11,7 +11,10 @@ identically, "1 unit" when it differs by one unit in the fifth figure (the
 tolerance of the existing Windows / dispatch smoke gate, check.py), and a
 FAILURE otherwise. A deck that fails in both executables the same way (the
 deck itself is refused) is counted as skipped; failing in only one is a
-FAILURE.
+FAILURE. An impedance whose magnitude is below --zero-ohms (default 1e-6 ohm)
+in both printouts is a zero (a source on an unexcited / shorted structure,
+printed as rounding noise around 1e-15) and is counted apart, not compared
+digit by digit.
 """
 
 from __future__ import annotations
@@ -52,13 +55,14 @@ def main() -> None:
     ap.add_argument("--decks", nargs="+", type=Path, required=True)
     ap.add_argument("--engine", default=None)
     ap.add_argument("--timeout", type=float, default=300)
+    ap.add_argument("--zero-ohms", type=float, default=1e-6)
     a = ap.parse_args()
 
     decks: list[Path] = []
     for d in a.decks:
         decks += sorted(d.glob("*.nec")) if d.is_dir() else [d]
 
-    n = {"decks": 0, "skipped": 0, "z": 0, "same": 0, "unit": 0, "fail": 0, "identical": 0}
+    n = {"decks": 0, "skipped": 0, "z": 0, "same": 0, "unit": 0, "zero": 0, "fail": 0, "identical": 0}
     fails: list[str] = []
     with tempfile.TemporaryDirectory() as td:
         for deck in decks:
@@ -85,6 +89,9 @@ def main() -> None:
             worst = 0.0
             for x, y in zip(za, zb):
                 n["z"] += 1
+                if max(abs(complex(float(x[0]), float(x[1]))), abs(complex(float(y[0]), float(y[1])))) < a.zero_ohms:
+                    n["zero"] += 1
+                    continue
                 u = max(last_digit_units(x[0], y[0]), last_digit_units(x[1], y[1]))
                 worst = max(worst, u)
                 if x == y:
@@ -104,7 +111,8 @@ def main() -> None:
 
     print(f"\n{a.a_label} vs {a.b_label}" + (f" (NECPP_ENGINE={a.engine})" if a.engine else "") + ":")
     print(f"  decks compared {n['decks']}, skipped (refused by both) {n['skipped']}")
-    print(f"  impedances {n['z']}: same {n['same']}, 1 unit in the 5th figure {n['unit']}, worse {n['fail']}")
+    print(f"  impedances {n['z']}: same {n['same']}, 1 unit in the 5th figure {n['unit']}, "
+          f"zero in both (|Z| < {a.zero_ohms:g} ohm) {n['zero']}, worse {n['fail']}")
     print(f"  printouts identical apart from timing lines: {n['identical']} of {n['decks']}")
     if fails:
         print("FAIL:\n  " + "\n  ".join(fails))

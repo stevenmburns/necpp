@@ -278,10 +278,12 @@ jobs:
         run: |
           mkdir decks; cp cli/scripts/smoke/*.nec decks/; cp necpp-src/testharness/data/*.nec decks/
           rm decks/hang.nec  # a regression deck for a hang: never finishes, on any build
+          rc=0
           for eng in baseline avx2; do
             python cli/scripts/smoke/compare_exes.py --a "$MSVC" --a-label MSVC --b "$MINGW" --b-label MinGW \
-              --decks decks --engine $eng --timeout 300
+              --decks decks --engine $eng --timeout 300 || rc=1
           done
+          exit $rc
       - name: Timing (indicative; synthetic 4,333-segment whip-over-grid deck, 13 frequencies)
         run: |
           python cli/scripts/smoke/make_grid_deck.py > grid.nec
