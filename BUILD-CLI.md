@@ -281,13 +281,15 @@ checks the missing-input errors (all three sources), `NECPP_VERBOSE`, the
 no-source usage error and `-n -i -o` under the `nec2dxs` name. CI runs it on
 every build.
 
-**The zips ship one exe and `install-4nec2.cmd`**, not six copies. A static
-exe is ~25 MB (two engine copies plus a DYNAMIC_ARCH OpenBLAS), ~7 MB
-compressed, and zip compresses each member separately, so six copies would
-make the download ~40 MB for six identical files. `install-4nec2.cmd
-[C:\4nec2\exe]` backs up any existing `nec2dxs*.exe` into
-`nec2dxs-backup-<date>\` and copies the exe (and, for MSVC, its DLLs) under
-the six names; the README says the same for anyone copying by hand.
+**The zips ship one exe and `install-4nec2.cmd`**, not six copies. The
+static exes are ~22 MB each (MinGW 22.3 MB, Linux 24.8 MB: two engine
+copies plus a DYNAMIC_ARCH OpenBLAS), ~6-7 MB compressed, and zip
+compresses each member separately, so six copies would make a ~35-40 MB
+download of identical files. (The MSVC exe alone is ~1 MB, because its
+OpenBLAS is the 20 MB `libscipy_openblas.dll` beside it.)
+`install-4nec2.cmd [C:\4nec2\exe]` backs up any existing `nec2dxs*.exe`
+into `nec2dxs-backup-<date>\` and copies the exe (and, for MSVC, its DLLs)
+under the six names; the README says the same for anyone copying by hand.
 
 ## Windows: MinGW-w64, one static file
 
@@ -335,6 +337,22 @@ smoke gate's tolerance: one unit in the fifth figure) and each printout
 apart from timing lines. It then times a synthetic 4,333-segment
 whip-over-grid deck (`scripts/smoke/make_grid_deck.py`; W8IO's whip is not
 ours to commit), indicative only.
+
+First results (run 43951234587, `windows-latest`, 4 vCPUs = 2 cores):
+impedances agree on every deck in both engine copies (63/63 accel, 64/64
+reuse, one of them a zero), but **the MinGW exe is slower where the fill
+dominates**: plain fill 1.5-1.75x MSVC's wall time (accel 124 vs 70 s at the
+default 2 threads, 85-94 vs 56 s at 4), while with fill-pair reuse on, which
+removes most of the fill, they are within 10 % (24 vs 22.5 s; 20.7 vs 19.6 s).
+The LU is the same OpenBLAS 0.3.34 in both, so the gap is in the fill,
+most likely MinGW-w64's libm (`sin`/`cos`/`exp`, the fill's inner work),
+which is slower than MSVC's CRT. Not yet measured apart.
+
+`testharness/sommerfield1.nec` crashes both Windows builds (access
+violation, 0xC0000005) but runs on Linux. Its `LD 5 1 1 41` loads segments
+1-41 of a 17-segment wire; an out-of-range write that Linux happens to
+survive is the likely cause (not confirmed). The compare job counts it as
+refused by both.
 
 ## Smoke test
 
