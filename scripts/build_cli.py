@@ -275,6 +275,32 @@ int main(int argc, char **argv) {
   if (!omp_env) omp_set_num_threads(cores);
 #endif
   const int n_blas = blas_env ? blas_env : (omp_env ? omp_env : cores);
+#if defined(NECPP_OPENBLAS_DELAYLOADED)
+  /* MSVC build: libscipy_openblas.dll starts its own thread pool when it is
+     loaded, sized from OPENBLAS_NUM_THREADS or else every CPU in the machine
+     (it ignores the affinity mask: 22 threads under start /affinity 55 on a
+     16-thread box). openblas_set_num_threads() afterwards only lowers the
+     count it uses, the pool stays. So the DLL is delay-loaded
+     (/DELAYLOAD), and OPENBLAS_NUM_THREADS is put in every environment it
+     may read before the call below loads it: the OS block, this exe's CRT,
+     and the shared CRTs (ucrtbase, msvcrt) when already loaded, since each
+     keeps its own copy made when it started. */
+  if (!blas_env) {
+    char v[16];
+    std::snprintf(v, sizeof v, "%d", n_blas);
+    SetEnvironmentVariableA("OPENBLAS_NUM_THREADS", v);
+    _putenv_s("OPENBLAS_NUM_THREADS", v);
+    typedef int(__cdecl * putenv_s_fn)(const char *, const char *);
+    typedef int(__cdecl * putenv_fn)(const char *);
+    if (HMODULE u = GetModuleHandleA("ucrtbase.dll"))
+      if (auto f = (putenv_s_fn)(void *)GetProcAddress(u, "_putenv_s")) f("OPENBLAS_NUM_THREADS", v);
+    if (HMODULE m = GetModuleHandleA("msvcrt.dll")) {
+      static char kv[48];
+      std::snprintf(kv, sizeof kv, "OPENBLAS_NUM_THREADS=%s", v);
+      if (auto f = (putenv_fn)(void *)GetProcAddress(m, "_putenv")) f(kv);
+    }
+  }
+#endif
   NECPP_OPENBLAS_SET_THREADS(n_blas);
   const bool v3 = cpu_has_v3();
   const char *force = std::getenv("NECPP_ENGINE");
@@ -448,7 +474,8 @@ def main() -> None:
         # scipy-openblas prefixes every symbol (see PyNEC/setup.py).
         defines += ["LAPACKE_zgetrf_work=scipy_LAPACKE_zgetrf_work",
                     "LAPACKE_zgetrs_work=scipy_LAPACKE_zgetrs_work",
-                    "NECPP_OPENBLAS_SET_THREADS=scipy_openblas_set_num_threads"]
+                    "NECPP_OPENBLAS_SET_THREADS=scipy_openblas_set_num_threads",
+                    "NECPP_OPENBLAS_DELAYLOADED=1"]
     else:
         cc = os.environ.get("CC", "gcc")
         prefix = (a.openblas_prefix or work / f"openblas-{OPENBLAS_VERSION}").resolve()
@@ -540,11 +567,13 @@ def main() -> None:
         run([os.environ.get("STRIP", "strip"), str(exe)])
     elif msvc:
         exe = out / f"{name}.exe"
-        run(["cl", "/nologo", "/MT", "/openmp", *map(str, objs), f"/Fe{exe}",
-             "/link", f"/LIBPATH:{ob_lib}", f"{ob_name}.lib"])
         # Runtime DLLs that ship beside the .exe.
         dll = next(Path(ob.get_lib_dir()).parent.rglob(f"{ob_name}*.dll"), None) or next(
             Path(ob.__file__).parent.rglob("*.dll"))
+        # Delay-loaded: the dispatcher sets OPENBLAS_NUM_THREADS before the
+        # DLL starts its thread pool (see NECPP_OPENBLAS_DELAYLOADED).
+        run(["cl", "/nologo", "/MT", "/openmp", *map(str, objs), f"/Fe{exe}",
+             "/link", f"/LIBPATH:{ob_lib}", f"{ob_name}.lib", f"/DELAYLOAD:{dll.name}", "delayimp.lib"])
         shutil.copy2(dll, out / dll.name)
         print(f"bundled {dll.name}")
         # The wheel's licence file (OpenBLAS + the runtimes inside its DLL).

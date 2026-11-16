@@ -157,6 +157,9 @@ jobs:
           $py cli/scripts/smoke/check.py --exe "$exe" --engine avx2
       - name: 4nec2 file names (argv, stdin, nec2d.tmp beside the exe)
         run: $PY cli/scripts/smoke/check_nec2d.py --exe "$EXE"
+      - name: Thread pools under a restricted affinity mask (Windows)
+        if: startsWith(matrix.os, 'windows')
+        run: $PY cli/scripts/smoke/check_threads.py --exe "$EXE"
       - name: Baseline copy on an SSE-only CPU (Linux, qemu-user -cpu Westmere)
         # qemu's decoder raises #UD on any VEX (AVX/AVX2/FMA) instruction when
         # the emulated CPU lacks AVX, so this proves the auto-dispatched

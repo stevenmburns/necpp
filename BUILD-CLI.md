@@ -153,6 +153,24 @@ and the OpenBLAS LU alike, as momwire's standalone launchers count them
 `OPENBLAS_NUM_THREADS` the LU (else `OMP_NUM_THREADS`).
 `NECPP_ENGINE_VERBOSE=1` reports the counts and where they came from.
 
+**The MSVC build's OpenBLAS DLL** (`libscipy_openblas.dll`) starts its own
+thread pool when it is loaded, sized from `OPENBLAS_NUM_THREADS` or else
+every CPU in the machine; it ignores the affinity mask, and
+`openblas_set_num_threads()` afterwards only lowers the count it uses (the
+pool stays). Observed: 22 threads under `start /affinity 55` on the 16-thread
+box, against 5 for the MinGW build. So the MSVC link delay-loads the DLL
+(`/DELAYLOAD`, `delayimp.lib`) and the dispatcher, before its first call
+into it, puts `OPENBLAS_NUM_THREADS=<count>` into the OS environment, its
+own CRT's, and the already-loaded shared CRTs' (`ucrtbase.dll`,
+`msvcrt.dll`), each of which keeps its own copy. An `OPENBLAS_NUM_THREADS`
+the user set is left alone. `scripts/smoke/check_threads.py` (CI, both
+Windows builds) starts the exe suspended, applies masks 0x1, 0x5 and all
+CPUs, and counts its threads by start module in toolhelp snapshots while it
+solves: the reported counts must equal the physical cores in the mask, the
+threads that are ours (not ntdll's loader / thread-pool workers) must stay
+within main + (n-1) OpenMP + (n-1) OpenBLAS (MSVC) + 1, and the MSVC
+OpenBLAS pool within n-1.
+
 Why: 4nec2 under a 4-CPU mask (0x55) with no thread variables started 36
 threads and ran past 204 s on the whip deck; with the variables at 4 it took
 23-27 s. The OpenMP and OpenBLAS defaults count every CPU in the machine,
