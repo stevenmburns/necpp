@@ -384,7 +384,7 @@ def check_no_initialisers(objs: list[Path], msvc: bool) -> None:
             if ".CRT$X" in hdr:  # .CRT$XCU (dynamic init), .CRT$XDU (thread_local init)
                 bad.append(o.name)
         else:
-            hdr = subprocess.run(["objdump", "-h", str(o)], capture_output=True, text=True, check=True).stdout
+            hdr = subprocess.run([os.environ.get("OBJDUMP", "objdump"), "-h", str(o)], capture_output=True, text=True, check=True).stdout
             if re.search(r"\s\.(init_array|ctors)\b", hdr):
                 bad.append(o.name)
     if bad:
@@ -537,7 +537,7 @@ def main() -> None:
         # all static, so it imports only KERNEL32 and msvcrt (CI checks).
         run([cxx, "-static", "-static-libgcc", "-static-libstdc++", "-fopenmp", "-o", str(exe),
              *map(str, objs), str(ob_lib / "libopenblas.a"), "-lm"])
-        run(["strip", str(exe)])
+        run([os.environ.get("STRIP", "strip"), str(exe)])
     elif msvc:
         exe = out / f"{name}.exe"
         run(["cl", "/nologo", "/MT", "/openmp", *map(str, objs), f"/Fe{exe}",
@@ -561,7 +561,7 @@ def main() -> None:
         exe = out / name
         run([cxx, "-static", "-fopenmp", "-o", str(exe), *map(str, objs),
              str(ob_lib / "libopenblas.a"), "-lm"])
-        run(["strip", str(exe)])
+        run([os.environ.get("STRIP", "strip"), str(exe)])
     print(f"built {exe}  sha256 {sha256(exe)}")
 
 

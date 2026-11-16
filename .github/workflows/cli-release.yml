@@ -113,20 +113,31 @@ jobs:
           update: false
           path-type: inherit
           install: >-
-            mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils mingw-w64-x86_64-python
-            make patch git perl
-      - name: Cache OpenBLAS (Windows, MinGW)
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-libgomp mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-python make patch git perl
+      # The MinGW OpenBLAS build takes ~20 min, so its cache is saved as soon
+      # as it exists, even when a later step fails. The key names the
+      # OpenBLAS flags' revision: bump "flags1" when OPENBLAS_FLAGS in
+      # build_cli.py or the MSYS2 toolchain changes.
+      - name: Restore OpenBLAS (Windows, MinGW)
         if: matrix.os == 'windows-mingw'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: work/openblas-0.3.34
-          key: openblas-0.3.34-mingw64-${{ hashFiles('cli/scripts/build_cli.py') }}
+          key: openblas-0.3.34-mingw64-flags1
       - name: Build (Windows, MinGW)
         if: matrix.os == 'windows-mingw'
         run: |
           gcc --version | head -1; ld --version | head -1
           python cli/scripts/build_cli.py --toolchain mingw --variant ${{ matrix.variant }} \
             --src necpp-src --out out --work work --openblas-prefix work/openblas-0.3.34 --jobs 4
+      - name: Save OpenBLAS (Windows, MinGW)
+        if: always() && matrix.os == 'windows-mingw' && hashFiles('work/openblas-0.3.34/lib/libopenblas.a') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: work/openblas-0.3.34
+          key: openblas-0.3.34-mingw64-flags1
+        continue-on-error: true
       - name: Imports gate (Windows, MinGW) -- KERNEL32 and msvcrt only, nothing Windows 7 lacks
         if: matrix.os == 'windows-mingw'
         run: |

@@ -18,6 +18,7 @@ is not on PATH.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -47,7 +48,7 @@ NOT_ON_WIN7 = {
 
 def objdump_imports(path: Path) -> dict[str, list[str]]:
     """{dll: [function, ...]} from objdump -p's import tables."""
-    p = subprocess.run(["objdump", "-p", str(path)], capture_output=True, text=True, check=True)
+    p = subprocess.run([os.environ.get("OBJDUMP", "objdump"), "-p", str(path)], capture_output=True, text=True, check=True)
     out: dict[str, list[str]] = {}
     cur = None
     for ln in p.stdout.splitlines():
