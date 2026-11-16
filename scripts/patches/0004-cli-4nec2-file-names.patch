@@ -72,7 +72,7 @@ index 4f3ab19..d87f949 100644
        "\n       -c: print results in comma-separated-value (CSV) format,"
        "\n           this options is used in conjunction with (-s) above."
 diff --git a/src/nec2cpp.cpp b/src/nec2cpp.cpp
-index 6b0fa9b..b85cb6e 100644
+index 6b0fa9b..b4895b4 100644
 --- a/src/nec2cpp.cpp
 +++ b/src/nec2cpp.cpp
 @@ -54,6 +54,7 @@
@@ -179,6 +179,21 @@ index 6b0fa9b..b85cb6e 100644
  
  				if( input_fp != NULL )
  					fclose( input_fp );
+@@ -611,6 +652,14 @@ int readmn(FILE* input_fp, FILE* output_fp,
+ #pragma GCC diagnostic ignored "-Wstringop-truncation"
+             strncpy( gm, "EN", 2 );
+ #pragma GCC diagnostic pop
++            /* NEC-2D echoes this implied EN with zero fields; without this
++               the echo repeats the previous card's (nec2d_layout only, so
++               the default printout is unchanged). */
++            if ( nec2d_layout )
++            {
++                *i1 = *i2 = *i3 = *i4 = 0;
++                *f1 = *f2 = *f3 = *f4 = *f5 = *f6 = 0.0;
++            }
+             return 0;
+ 		}
+ 		else
 diff --git a/src/nec2d_layout.h b/src/nec2d_layout.h
 new file mode 100644
 index 0000000..ebdd38d

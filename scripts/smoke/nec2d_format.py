@@ -91,6 +91,10 @@ def check_file(nec2d: Path, normal: Path) -> list[str]:
                 vals = (int(f[1]), f[3], int(f[4]), int(f[5]), int(f[6]), int(f[7]), *map(float, f[8:]))
                 if CARD_FMT % vals != ln:
                     bad(i, "card echo not in NEC-2D format")
+                # EN has no fields: NEC-2D (and NEC2/MP) echo zeros, also for
+                # the EN nec2++ implies at the end of a deck that has none.
+                if f[3] == "EN" and any(v != 0 for v in vals[2:]):
+                    bad(i, "EN card echo with non-zero fields (stale from the card before)")
             except ValueError:
                 bad(i, "card echo fields")
             n_card += 1

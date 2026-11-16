@@ -174,6 +174,11 @@ jobs:
           python3 cli/scripts/smoke/check.py --exe /tmp/qnec --engine auto | tee /tmp/q.log
           grep -q "engine: baseline" /tmp/q.log
           if NECPP_ENGINE=avx2 /tmp/qnec -v; then echo "avx2 forced on a CPU without it must refuse"; exit 1; fi
+      - name: libm benchmark (glibc, for comparison with the Windows runtimes)
+        if: matrix.os == 'linux' && matrix.variant == 'accel'
+        run: |
+          g++ -O3 -fno-strict-overflow -mtune=generic -march=x86-64 cli/scripts/bench/libm_bench.cpp -o lb-glibc
+          ./lb-glibc | sed "s/^LIBM /LIBM glibc-x86-64 /"
       - name: Compare with the matching pynec-accel wheel (Linux)
         # accel = pynec-accel 1.7.6's engine; reuse = 1.7.7's (62dacd4), whose
         # reuse is opt-in there, so PYNEC_FILL_REUSE=1 turns it on for PyNEC.
@@ -284,33 +289,57 @@ jobs:
               --decks decks --engine $eng --timeout 300 || rc=1
           done
           exit $rc
-      - name: Timing (indicative; synthetic 4,333-segment whip-over-grid deck, 13 frequencies)
+      - name: Timing (indicative; grid deck 4,333 segments x 13 freqs, LogYag-like LPDA 1,350 x 65)
         run: |
           python cli/scripts/smoke/make_grid_deck.py > grid.nec
+          python cli/scripts/bench/make_lpda_deck.py > lpda.nec
           echo "CPUs: $NUMBER_OF_PROCESSORS"
           NECPP_ENGINE_VERBOSE=1 "$MINGW" -v
           # Each build at its default thread count (one per physical core in
-          # the mask) and at OMP_NUM_THREADS=4 (every vCPU), twice each.
-          for label in MSVC MINGW; do
-            exe="${!label}"
-            for reuse in 0 1; do
-              [ "${{ matrix.variant }}" = accel ] && [ $reuse = 1 ] && continue
-              for thr in default 4; do
-                for k in 1 2; do
+          # the mask) and at OMP_NUM_THREADS=4 (every vCPU). FILLFACTOR sums
+          # nec2++'s per-frequency FILL / FACTOR msec (clock(): wall time on
+          # both Windows runtimes).
+          for deck in grid lpda; do
+            for label in MSVC MINGW; do
+              exe="${!label}"
+              for reuse in 0 1; do
+                [ "${{ matrix.variant }}" = accel ] && [ $reuse = 1 ] && continue
+                for thr in default 4; do
+                  o="$deck-$label-$reuse-$thr.out"
                   s=$(date +%s.%N)
                   if [ $thr = default ]; then
-                    PYNEC_FILL_REUSE=$reuse "$exe" -n -i grid.nec -o "grid-$label-$reuse.out"
+                    PYNEC_FILL_REUSE=$reuse "$exe" -n -i $deck.nec -o "$o"
                   else
-                    OMP_NUM_THREADS=$thr PYNEC_FILL_REUSE=$reuse "$exe" -n -i grid.nec -o "grid-$label-$reuse.out"
+                    OMP_NUM_THREADS=$thr PYNEC_FILL_REUSE=$reuse "$exe" -n -i $deck.nec -o "$o"
                   fi
                   e=$(date +%s.%N)
-                  echo "TIMING variant=${{ matrix.variant }} build=$label PYNEC_FILL_REUSE=$reuse threads=$thr run=$k wall=$(python -c "print(f'{$e-$s:.2f}')") s"
+                  echo "TIMING deck=$deck variant=${{ matrix.variant }} build=$label PYNEC_FILL_REUSE=$reuse threads=$thr wall=$(python -c "print(f'{$e-$s:.2f}')") s"
+                  python cli/scripts/bench/fill_factor.py "$o" "deck=$deck build=$label reuse=$reuse threads=$thr"
                 done
               done
             done
           done
           python cli/scripts/smoke/compare_exes.py --a "$MSVC" --a-label MSVC --b "$MINGW" --b-label MinGW \
-            --decks grid.nec --timeout 600
+            --decks grid.nec lpda.nec --timeout 900
+      - name: MSYS2 MINGW64 for the libm benchmark
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc
+      - name: libm benchmark (MSVC UCRT vs MinGW-w64 msvcrt + mingwex, same runner)
+        run: |
+          # The fill's scalar math (gf(): sqrt, sin, cos; complex arithmetic),
+          # one thread, compiled as the engine copies are compiled.
+          MSYS_NO_PATHCONV=1 cl /nologo /O2 /EHsc /MT cli/scripts/bench/libm_bench.cpp /Fe:lb-msvc.exe >/dev/null
+          MSYS_NO_PATHCONV=1 cl /nologo /O2 /EHsc /MT /arch:AVX2 cli/scripts/bench/libm_bench.cpp /Fe:lb-msvc-avx2.exe >/dev/null
+          gpp="$(cygpath -u "$RUNNER_TEMP")/msys64/mingw64/bin/g++.exe"
+          export PATH="$(dirname "$gpp"):$PATH"
+          for arch in x86-64 x86-64-v3; do
+            "$gpp" -O3 -fno-strict-overflow -mtune=generic -march=$arch -Wa,-muse-unaligned-vector-move \
+              -D__USE_MINGW_ANSI_STDIO=1 -static cli/scripts/bench/libm_bench.cpp -o lb-mingw-$arch.exe
+          done
+          for b in lb-msvc lb-msvc-avx2 lb-mingw-x86-64 lb-mingw-x86-64-v3; do echo "== $b"; ./$b.exe | sed "s/^LIBM /LIBM $b /"; done
 
   release:
     # Only on a cli-v* tag push, and only when the maintainer has opted in.

@@ -37,7 +37,7 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-DECKS = ["dipole.nec", "yagi3-ground.nec", "cross.nec", "dipole-norm.nec"]
+DECKS = ["dipole.nec", "yagi3-ground.nec", "cross.nec", "dipole-norm.nec", "dipole-noen.nec"]
 WIN = os.name == "nt"
 EXT = ".exe" if WIN else ""
 SEP = "\\" if WIN else "/"
@@ -54,6 +54,10 @@ def deck_bytes(deck: str) -> bytes:
     if deck == "dipole-norm.nec":
         # the dipole with a normalized (total-gain) pattern: RP ... 1500
         return (HERE / "dipole.nec").read_bytes().replace(b"RP 0 19 1 1000 0 0 10 0", b"RP 0 19 1 1500 0 0 10 0")
+    if deck == "dipole-noen.nec":
+        # no EN card: nec2++ implies one at the end of the file, and its echo
+        # must carry zeros, not the RP card's fields
+        return b"\n".join(ln for ln in (HERE / "dipole.nec").read_bytes().splitlines() if ln.strip() != b"EN") + b"\n"
     return (HERE / deck).read_bytes()
 
 
