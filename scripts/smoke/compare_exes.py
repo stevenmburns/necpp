@@ -28,7 +28,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from check import last_digit_units, nec2_impedances  # noqa: E402
 
-TIMING = re.compile(r"TIME|SECONDS|\bSEC\b|ELAPSED", re.I)
+TIMING = re.compile(r"TIME|SECONDS|\bSEC\b|\bmsec\b|ELAPSED", re.I)
 
 
 def run(exe: str, deck: Path, out: Path, engine: str | None, timeout: float) -> tuple[int | str, str]:

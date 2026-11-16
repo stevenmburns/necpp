@@ -27,6 +27,12 @@ Patches applied to a copy of the tree (never to the checkout):
 - `scripts/patches/0003-math-util-engine-namespace.patch` (both): three
   `::norm*` calls in `math_util.h` become `NECPP_NS::norm*`; `NECPP_NS` is
   empty unless the dispatch build defines it, so it is the original code.
+- `scripts/patches/0004-cli-4nec2-file-names.patch` (both): the file-name
+  conventions 4nec2 uses with its NEC-2 engines, so the exe can be installed
+  as 4nec2's `nec2dxs*.exe` with no shim. See "4nec2" below. Adds
+  `src/nec2d_names.{h,cpp}` (also listed in `src/Makefile.am`, so a plain
+  autotools build gets it too) and a call from `nec_main`; nothing changes
+  when `-i` is given.
 
 ## Why a script and not autotools
 
@@ -132,6 +138,116 @@ python scripts/build_cli.py --variant accel --src necpp-src --out out --work wor
 The zip ships `libscipy_openblas*.dll` and `vcomp140.dll` (the MSVC OpenMP
 runtime has no static form) beside the `.exe`; `scripts/check_imports.py`
 asserts that nothing else outside Windows itself is imported.
+
+## 4nec2 (patch 0004)
+
+4nec2 runs a NEC-2 engine installed as `nec2dxs500.exe`, `nec2dxs1K5.exe`,
+`nec2dxs3k0.exe`, `nec2dxs5k0.exe`, `nec2dxs8k0.exe` or `nec2dxs11k.exe`
+(picked from a size table), and hands it the file names without `-i`/`-o`.
+When nec2++ is started **with no `-i`**, it takes the names from the first
+of these that yields two:
+
+1. exactly two positional arguments: `nec2++ in.nec out.out`;
+2. the first two non-blank lines of stdin, when stdin is redirected (not a
+   console / tty: `!isatty(0)` on Linux,
+   `GetFileType(GetStdHandle(STD_INPUT_HANDLE)) != FILE_TYPE_CHAR` on
+   Windows; `NUL` counts as a console). Redirected but empty, or no stdin
+   handle at all (a GUI parent), falls through to 3;
+3. the first two non-blank lines of `nec2d.tmp` in the **executable's own
+   directory** (from `/proc/self/exe` / `GetModuleFileNameA`), which 4nec2
+   writes before each run: CRLF lines of paths relative to that directory,
+   e.g. `..\out\WHIP_ANT.inp`. A `nec2d.tmp` that is there but holds fewer
+   than two names is an error.
+
+Each name is trimmed of surrounding whitespace and CR/LF and of one pair of
+surrounding double quotes. Relative names resolve against the current
+directory; when they came from `nec2d.tmp` and the input is not found there,
+both resolve against the executable's directory instead. The
+wire-intersection check is off in this mode (as with `-n`). An explicit
+`-o` still wins over the second name.
+
+- `NECPP_VERBOSE=1` prints the source and the resolved paths on **stderr**.
+  Nothing is written to stdout.
+- Exit status 0 on success. A missing input prints
+  `nec2++: input file not found: ...` (naming the source and the
+  directories tried) on stderr and exits 2. Other errors keep their old
+  status.
+- With no arguments, a tty stdin and no `nec2d.tmp`, nec2++ prints its usage
+  and exits non-zero, as before. Every flag behaves as before.
+- `nec2d_names.cpp` is compiled **once**, at the baseline, outside both
+  engine namespaces: its functions have C linkage (so `nec2cpp.cpp`'s calls
+  from inside either namespace reach the one definition) and it includes
+  `<windows.h>`, which must stay out of the namespace wrappers.
+- Caveat: a host that redirects stdin to a pipe and never writes or closes
+  it would block the read in step 2. No evidence that 4nec2 does that (the
+  shim this replaces read stdin under the same rule).
+
+`scripts/smoke/check_nec2d.py --exe <nec2++>` copies the exe, with any DLLs
+beside it, into a 4nec2-like layout (`exe/nec2dxs1K5.exe`, `out/*.inp` with
+CRLF) and runs it with each source: arguments, redirected stdin (quoted,
+padded, CRLF names; beating a stale `nec2d.tmp`), and `nec2d.tmp` with a
+console stdin (a pty on Linux, `NUL` on Windows), with an empty redirected
+stdin, and from the exe's directory. Each printout must be byte-identical to
+the same exe's `-n -i -o` printout apart from the timing lines (`FILL=`
+/ `FACTOR:` msec and the run time), stdout must be empty, and the status 0.
+`cross.nec` (two wires crossing mid-segment) is in the set because the
+intersection check refuses it, so it passing shows the check is off. It also
+checks the missing-input errors (all three sources), `NECPP_VERBOSE`, the
+no-source usage error and `-n -i -o` under the `nec2dxs` name. CI runs it on
+every build.
+
+**The zips ship one exe and `install-4nec2.cmd`**, not six copies. A static
+exe is ~25 MB (two engine copies plus a DYNAMIC_ARCH OpenBLAS), ~7 MB
+compressed, and zip compresses each member separately, so six copies would
+make the download ~40 MB for six identical files. `install-4nec2.cmd
+[C:\4nec2\exe]` backs up any existing `nec2dxs*.exe` into
+`nec2dxs-backup-<date>\` and copies the exe (and, for MSVC, its DLLs) under
+the six names; the README says the same for anyone copying by hand.
+
+## Windows: MinGW-w64, one static file
+
+`--toolchain mingw` (the default in an MSYS2 **MINGW64** shell) builds one
+self-contained `.exe` that imports only `KERNEL32.dll` and `msvcrt.dll`, as
+Ward's NEC5CL builds do. MINGW64's runtime is the system `msvcrt.dll`
+(not the UCRT), present on every Windows since XP.
+
+- Toolchain: MSYS2 MINGW64 `mingw-w64-x86_64-gcc` (on GitHub's
+  `windows-latest` via `msys2/setup-msys2`). Same compile flags as Linux
+  (`-O3 -fno-strict-overflow -mtune=generic -fopenmp`, baseline
+  `-march=x86-64`, avx2 copy `-march=x86-64-v3`), same dispatcher.
+- **`-Wa,-muse-unaligned-vector-move`**: the Win64 ABI only aligns the stack
+  to 16 bytes, but GCC spills 256-bit AVX values with aligned moves assuming
+  32 (GCC PR 54412), which faults at random. binutils >= 2.38 assembles every
+  aligned vector move as its unaligned form, which costs nothing on aligned
+  data.
+- OpenBLAS: the **same pinned 0.3.34 tarball and flags as Linux**
+  (`DYNAMIC_ARCH=1 USE_OPENMP=1 NO_SHARED=1 NUM_THREADS=64 NOFORTRAN=1
+  C_LAPACK=1 ...`), built in MSYS2 by the script, not MSYS2's
+  `mingw-w64-x86_64-openblas`: that package is built with a Fortran LAPACK
+  (it would drag libgfortran / libquadmath into the static link) and to its
+  own threading choice and version, where this keeps one OpenBLAS
+  configuration across the Linux and MinGW builds. CI caches it.
+- Link: `g++ -static -static-libgcc -static-libstdc++ -fopenmp ...
+  libopenblas.a -lm`, then `strip`: libgomp, winpthreads, libstdc++ and
+  libgcc are all inside the exe. The dispatcher's `openblas_set_num_threads`
+  work-around (see Linux) applies here too.
+- **Imports gate** (hard failure in CI):
+  `scripts/check_imports.py out --only kernel32.dll,msvcrt.dll --win7` reads
+  the import table with `objdump -p`, fails on any other DLL, on any DLL in
+  the output folder, and on any KERNEL32 function Windows 7 lacks
+  (`GetSystemTimePreciseAsFileTime`, `WaitOnAddress`, ...).
+- Licences: the zip adds winpthreads' licence (MIT-style; it asks for its
+  notice in binary copies) and the mingw-w64 CRT's where MSYS2 ships one.
+  libgcc / libstdc++ / libgomp are under the GCC Runtime Library Exception.
+
+The CI job `compare-windows` downloads the MSVC and MinGW zips of each
+variant onto one runner and runs `scripts/smoke/compare_exes.py`: the smoke
+decks plus necpp's `testharness/data/*.nec` through both exes, once per
+engine copy, comparing every input impedance to the printed digits (the
+smoke gate's tolerance: one unit in the fifth figure) and each printout
+apart from timing lines. It then times a synthetic 4,333-segment
+whip-over-grid deck (`scripts/smoke/make_grid_deck.py`; W8IO's whip is not
+ours to commit), indicative only.
 
 ## Smoke test
 

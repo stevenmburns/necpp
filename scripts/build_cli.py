@@ -247,11 +247,19 @@ def build_openblas(work: Path, prefix: Path, jobs: int, cc: str) -> None:
     with tarfile.open(tb) as t:
         t.extractall(work, filter="tar") if hasattr(tarfile, "data_filter") else t.extractall(work)
     flags = OPENBLAS_FLAGS + [f"CC={cc}", f"HOSTCC={cc}"]
-    with open(work / "openblas-build.log", "w") as log:
-        subprocess.run(["make", f"-j{jobs}", *flags, "libs", "netlib"], cwd=srcdir,
-                       stdout=log, stderr=subprocess.STDOUT, check=True)
-        subprocess.run(["make", *flags, f"PREFIX={prefix}", "install"], cwd=srcdir,
-                       stdout=log, stderr=subprocess.STDOUT, check=True)
+    logpath = work / "openblas-build.log"
+    try:
+        with open(logpath, "w") as log:
+            subprocess.run(["make", f"-j{jobs}", *flags, "libs", "netlib"], cwd=srcdir,
+                           stdout=log, stderr=subprocess.STDOUT, check=True)
+            subprocess.run(["make", *flags, f"PREFIX={prefix}", "install"], cwd=srcdir,
+                           stdout=log, stderr=subprocess.STDOUT, check=True)
+    except subprocess.CalledProcessError:
+        lines = logpath.read_text(errors="replace").splitlines()
+        errs = [ln for ln in lines if re.search(r"error|Error \d|\*\*\*", ln)]
+        print("--- OpenBLAS build failed; error lines:\n" + "\n".join(errs[:60]))
+        print("--- last 60 lines of " + str(logpath) + ":\n" + "\n".join(lines[-60:]), flush=True)
+        raise
 
 
 def check_no_initialisers(objs: list[Path], msvc: bool) -> None:

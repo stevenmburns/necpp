@@ -238,26 +238,34 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
       - uses: actions/download-artifact@v4
         with:
           path: dl
-          pattern: "nec2++-${{ matrix.variant == 'reuse' && 'accel-reuse' || 'accel' }}-*-windows-*"
+          pattern: "nec2++-*-windows-*"
       - name: Unpack
         run: |
           for z in dl/*/*.zip; do 7z x -bd -y -oexes "$z" >/dev/null; done
           ls -la exes/*
-          msvc="$(ls exes/*-windows-x86_64/*.exe)"; mingw="$(ls exes/*-windows-mingw-x86_64/*.exe)"
+          # "accel-*" would also match "accel-reuse-*": name the 7-hex sha.
+          if [ "${{ matrix.variant }}" = reuse ]; then p="nec2++-accel-reuse-"; else p="nec2++-accel-"; fi
+          msvc="$(ls exes/${p}[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-windows-x86_64/*.exe)"
+          mingw="$(ls exes/${p}[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-windows-mingw-x86_64/*.exe)"
+          test -n "$msvc" && test -n "$mingw" && test "$(echo "$msvc" | wc -l)" = 1 && test "$(echo "$mingw" | wc -l)" = 1
           echo "MSVC=$msvc" >> "$GITHUB_ENV"; echo "MINGW=$mingw" >> "$GITHUB_ENV"
       - name: Sizes and imports
         run: |
           for e in "$MSVC" "$MINGW"; do
             echo "== $e: $(stat -c %s "$e") bytes"
-            objdump -p "$e" 2>/dev/null | grep "DLL Name" || echo "(objdump unavailable)"
+            dumpbin /nologo /dependents "$e" | sed -n '/following dependencies/,/Summary/p'
             ls -la "$(dirname "$e")"
           done
       - name: Correctness (smoke + necpp testharness decks), each engine copy
         run: |
           mkdir decks; cp cli/scripts/smoke/*.nec decks/; cp necpp-src/testharness/data/*.nec decks/
+          rm decks/hang.nec  # a regression deck for a hang: never finishes, on any build
           for eng in baseline avx2; do
             python cli/scripts/smoke/compare_exes.py --a "$MSVC" --a-label MSVC --b "$MINGW" --b-label MinGW \
               --decks decks --engine $eng --timeout 300

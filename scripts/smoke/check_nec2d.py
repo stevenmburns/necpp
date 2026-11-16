@@ -39,7 +39,7 @@ WIN = os.name == "nt"
 EXT = ".exe" if WIN else ""
 SEP = "\\" if WIN else "/"
 # Lines that carry a measured time (nec2++ prints elapsed / CPU times).
-TIMING = re.compile(r"TIME|SECONDS|\bSEC\b|ELAPSED", re.I)
+TIMING = re.compile(r"TIME|SECONDS|\bSEC\b|\bmsec\b|ELAPSED", re.I)
 
 failures: list[str] = []
 
@@ -82,6 +82,12 @@ def same_printout(got: Path, ref: Path, label: str) -> None:
     n_time = len(ref.read_bytes().splitlines()) - len(r)
     check(g == r and len(r) > 20,
           f"{label}: printout byte-identical to the -n -i -o run ({len(r)} lines, {n_time} timing lines skipped)")
+    if g != r:
+        diffs = [(i, x, y) for i, (x, y) in enumerate(zip(r, g)) if x != y][:3]
+        for i, x, y in diffs:
+            print(f"        line {i}: ref {x!r}\n                 got {y!r}")
+        if len(g) != len(r):
+            print(f"        {len(g)} lines vs {len(r)}")
 
 
 def quiet_ok(p: subprocess.CompletedProcess, label: str) -> None:
