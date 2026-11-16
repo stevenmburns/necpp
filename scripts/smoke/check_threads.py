@@ -104,8 +104,9 @@ def thread_starts(pid: int) -> dict[int, int]:
     return out
 
 
-def run_masked(exe: Path, mask: int, deck: Path) -> tuple[dict[str, int], int, str]:
+def run_masked(exe: Path, mask: int, deck: Path, extra: dict | None = None):
     env = {k: v for k, v in os.environ.items() if k not in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS")}
+    env.update(extra or {})
     env["NECPP_ENGINE_VERBOSE"] = "1"
     with tempfile.TemporaryDirectory() as td:
         p = subprocess.Popen([str(exe), "-n", "-i", str(deck), "-o", str(Path(td) / "o.out")], env=env,
@@ -158,6 +159,7 @@ def main() -> None:
             n = physical_cores(mask)
             peak, total, ours, err = run_masked(exe, mask, deck)
             line = next((ln for ln in err.splitlines() if "threads:" in ln), "")
+            print("  " + " | ".join(ln.strip() for ln in err.splitlines() if "OpenBLAS DLL" in ln))
             msvc_build = (exe.parent / "vcomp140.dll").exists()
             blas = sum(c for m, c in peak.items() if m.startswith("libscipy_openblas"))
             budget = 1 + (n - 1) + ((n - 1) if msvc_build else 0) + 1
@@ -170,6 +172,11 @@ def main() -> None:
                 fails.append(f"mask {mask:#x}: {ours} threads > budget {budget}")
             if blas > max(0, n - 1):
                 fails.append(f"mask {mask:#x}: {blas} OpenBLAS pool threads > {n - 1}")
+        # Diagnostic (not asserted): a user-set OPENBLAS_NUM_THREADS=1 under
+        # the one-CPU mask, which the DLL reads at load time if it reads it.
+        peak, total, ours, err = run_masked(exe, 0x1, deck, {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"})
+        print(f"diagnostic, mask 0x1 with OMP/OPENBLAS_NUM_THREADS=1 set: peak by start module {peak}")
+        print("  " + " | ".join(ln.strip() for ln in err.splitlines() if "nec2++" in ln))
         print("PASS" if not fails else "FAIL:\n  " + "\n  ".join(fails))
         sys.exit(1 if fails else 0)
 

@@ -157,6 +157,13 @@ jobs:
           $py cli/scripts/smoke/check.py --exe "$exe" --engine avx2
       - name: 4nec2 file names (argv, stdin, nec2d.tmp beside the exe)
         run: $PY cli/scripts/smoke/check_nec2d.py --exe "$EXE"
+      - name: OpenBLAS DLL exports and imports (MSVC, diagnostic)
+        if: matrix.os == 'windows'
+        run: |
+          d="$(ls out/libscipy_openblas*.dll | head -1)"
+          MSYS_NO_PATHCONV=1 dumpbin /nologo /dependents "$d" | sed -n '/following dependencies/,/Summary/p'
+          MSYS_NO_PATHCONV=1 dumpbin /nologo /exports "$d" | grep -i -E "thread|num_|env|server|init" | head -40
+          MSYS_NO_PATHCONV=1 dumpbin /nologo /dependents "$EXE" | sed -n '/dependencies/,/Summary/p'
       - name: Thread pools under a restricted affinity mask (Windows)
         if: startsWith(matrix.os, 'windows')
         run: $PY cli/scripts/smoke/check_threads.py --exe "$EXE"

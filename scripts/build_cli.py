@@ -276,6 +276,7 @@ int main(int argc, char **argv) {
 #endif
   const int n_blas = blas_env ? blas_env : (omp_env ? omp_env : cores);
 #if defined(NECPP_OPENBLAS_DELAYLOADED)
+  const bool blas_loaded_early = GetModuleHandleA(NECPP_OPENBLAS_DLL) != nullptr;
   /* MSVC build: libscipy_openblas.dll starts its own thread pool when it is
      loaded, sized from OPENBLAS_NUM_THREADS or else every CPU in the machine
      (it ignores the affinity mask: 22 threads under start /affinity 55 on a
@@ -326,6 +327,10 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "nec2++ engine: %s (cpu x86-64-v3: %s%s)\n",
                  use_avx2 ? "avx2" : "baseline", v3 ? "yes" : "no",
                  (force && *force) ? ", NECPP_ENGINE set" : "");
+#if defined(NECPP_OPENBLAS_DELAYLOADED)
+    std::fprintf(stderr, "nec2++ OpenBLAS DLL %s loaded before the thread count was set\n",
+                 blas_loaded_early ? "WAS" : "was not");
+#endif
     std::fprintf(stderr, "nec2++ threads: fill %d%s, LU %d%s (affinity mask: %d CPUs)\n",
                  omp_env ? omp_env : cores, omp_env ? " (OMP_NUM_THREADS)" : " (physical cores in the mask)",
                  n_blas, blas_env ? " (OPENBLAS_NUM_THREADS)" : (omp_env ? " (OMP_NUM_THREADS)" : " (physical cores in the mask)"),
@@ -475,7 +480,8 @@ def main() -> None:
         defines += ["LAPACKE_zgetrf_work=scipy_LAPACKE_zgetrf_work",
                     "LAPACKE_zgetrs_work=scipy_LAPACKE_zgetrs_work",
                     "NECPP_OPENBLAS_SET_THREADS=scipy_openblas_set_num_threads",
-                    "NECPP_OPENBLAS_DELAYLOADED=1"]
+                    "NECPP_OPENBLAS_DELAYLOADED=1",
+                    f'NECPP_OPENBLAS_DLL="{ob_name}.dll"']
     else:
         cc = os.environ.get("CC", "gcc")
         prefix = (a.openblas_prefix or work / f"openblas-{OPENBLAS_VERSION}").resolve()
