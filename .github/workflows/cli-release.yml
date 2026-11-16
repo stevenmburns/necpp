@@ -1,7 +1,9 @@
 name: cli-release
 
 # Build the nec2++ command-line executables (BUILD-CLI.md) for two engine
-# variants on Linux and Windows, smoke-test them, and upload zips.
+# variants on Linux, Windows (MSVC) and Windows (MinGW, one static file),
+# smoke-test them, test the 4nec2 file-name conventions, compare the two
+# Windows builds deck by deck, and upload zips.
 #
 #   workflow_dispatch  -> workflow ARTIFACTS only (never a release). GitHub
 #                        only offers it once this file is on the default
@@ -19,7 +21,7 @@ name: cli-release
 on:
   workflow_dispatch:
   push:
-    branches: [cli-build]
+    branches: [cli-build, cli-4nec2-static]
     tags: ["cli-v*"]
 
 permissions:
@@ -40,11 +42,11 @@ jobs:
       fail-fast: false
       matrix:
         variant: [accel, reuse]
-        os: [linux, windows]
-    runs-on: ${{ matrix.os == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
+        os: [linux, windows, windows-mingw]
+    runs-on: ${{ startsWith(matrix.os, 'windows') && 'windows-latest' || 'ubuntu-latest' }}
     defaults:
       run:
-        shell: bash
+        shell: ${{ matrix.os == 'windows-mingw' && 'msys2 {0}' || 'bash' }}
     steps:
       - name: Check out the build scripts (this ref)
         uses: actions/checkout@v4
@@ -102,10 +104,39 @@ jobs:
           # (missing Microsoft runtime DLLs are copied in from the redist tree).
           python cli/scripts/check_imports.py out --redist "$VCToolsRedistDir"
 
+      # ---------------- Windows: MSYS2 MINGW64, one static file --------------
+      - name: MSYS2 MINGW64 (Windows, MinGW)
+        if: matrix.os == 'windows-mingw'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          path-type: inherit
+          install: >-
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils mingw-w64-x86_64-python
+            make patch git perl
+      - name: Cache OpenBLAS (Windows, MinGW)
+        if: matrix.os == 'windows-mingw'
+        uses: actions/cache@v4
+        with:
+          path: work/openblas-0.3.34
+          key: openblas-0.3.34-mingw64-${{ hashFiles('cli/scripts/build_cli.py') }}
+      - name: Build (Windows, MinGW)
+        if: matrix.os == 'windows-mingw'
+        run: |
+          gcc --version | head -1; ld --version | head -1
+          python cli/scripts/build_cli.py --toolchain mingw --variant ${{ matrix.variant }} \
+            --src necpp-src --out out --work work --openblas-prefix work/openblas-0.3.34 --jobs 4
+      - name: Imports gate (Windows, MinGW) -- KERNEL32 and msvcrt only, nothing Windows 7 lacks
+        if: matrix.os == 'windows-mingw'
+        run: |
+          objdump -p out/*.exe | grep "DLL Name"
+          python cli/scripts/check_imports.py out --only kernel32.dll,msvcrt.dll --win7
+
       # ---------------- smoke test: both engine copies -----------------------
       - name: Smoke test (auto dispatch, baseline forced, avx2 forced)
         run: |
-          py=python3; [ "${{ matrix.os }}" = windows ] && py=python
+          py=python3; [ "${{ matrix.os }}" != linux ] && py=python
           exe="$(ls out/nec2++-* | grep -v -i '\.dll$' | head -1)"
           echo "EXE=$exe" >> "$GITHUB_ENV"; echo "PY=$py" >> "$GITHUB_ENV"
           "$exe" -v
@@ -113,6 +144,8 @@ jobs:
           $py cli/scripts/smoke/check.py --exe "$exe" --engine auto
           $py cli/scripts/smoke/check.py --exe "$exe" --engine baseline
           $py cli/scripts/smoke/check.py --exe "$exe" --engine avx2
+      - name: 4nec2 file names (argv, stdin, nec2d.tmp beside the exe)
+        run: $PY cli/scripts/smoke/check_nec2d.py --exe "$EXE"
       - name: Baseline copy on an SSE-only CPU (Linux, qemu-user -cpu Westmere)
         # qemu's decoder raises #UD on any VEX (AVX/AVX2/FMA) instruction when
         # the emulated CPU lacks AVX, so this proves the auto-dispatched
@@ -152,11 +185,26 @@ jobs:
           if [ "${{ matrix.os }}" = windows ]; then
             cp cli/scripts/licenses/MSVC-redist-NOTICE.txt "pkg/$base/"
           fi
+          if [ "${{ matrix.os }}" = windows-mingw ]; then
+            # Statically linked runtime pieces whose licences ask for their
+            # notice in binary copies: winpthreads (MIT-style) and the
+            # mingw-w64 CRT start-up code. libgcc / libstdc++ / libgomp are
+            # under the GCC Runtime Library Exception (no notice required).
+            lic=/mingw64/share/licenses
+            ls "$lic" | grep -i -e pthread -e crt -e mingw || true
+            f="$(find "$lic" -ipath '*pthread*' -type f | head -1)"
+            test -n "$f" && cp "$f" "pkg/$base/winpthreads-LICENSE.txt"
+            f="$(find "$lic" -ipath '*crt*' -type f -iname 'COPYING*' | head -1)"
+            if [ -n "$f" ]; then cp "$f" "pkg/$base/mingw-w64-crt-LICENSE.txt"; fi
+          fi
+          if [ "${{ matrix.os }}" != linux ]; then
+            cp cli/scripts/install-4nec2.cmd "pkg/$base/"
+          fi
           $PY cli/scripts/make_readme.py --variant ${{ matrix.variant }} --os ${{ matrix.os }} \
             --necpp-commit "$(git -C necpp-src rev-parse HEAD)" --cli-commit "$(git -C cli rev-parse HEAD)" \
             --exe "$EXE" > "pkg/$base/README.txt"
           cd pkg
-          if [ "${{ matrix.os }}" = windows ]; then 7z a -bd "$base.zip" "$base" >/dev/null; else zip -qr "$base.zip" "$base"; fi
+          if [ "${{ matrix.os }}" != linux ]; then 7z a -bd "$base.zip" "$base" >/dev/null; else zip -qr "$base.zip" "$base"; fi
           ls -la . "$base"
           echo "name=$base" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
@@ -164,6 +212,74 @@ jobs:
           name: ${{ steps.pkg.outputs.name }}
           path: pkg/${{ steps.pkg.outputs.name }}.zip
           if-no-files-found: error
+
+  compare-windows:
+    # The MSVC and MinGW executables of each variant, side by side on one
+    # runner: the same decks through both (correctness), then timing.
+    name: MSVC vs MinGW / ${{ matrix.variant }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [accel, reuse]
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: cli
+      - name: Check out the necpp commit (its test decks)
+        uses: actions/checkout@v4
+        with:
+          path: necpp-src
+          ref: ${{ matrix.variant == 'reuse' && env.NECPP_REUSE_COMMIT || env.NECPP_ACCEL_COMMIT }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
+          pattern: "nec2++-${{ matrix.variant == 'reuse' && 'accel-reuse' || 'accel' }}-*-windows-*"
+      - name: Unpack
+        run: |
+          for z in dl/*/*.zip; do 7z x -bd -y -oexes "$z" >/dev/null; done
+          ls -la exes/*
+          msvc="$(ls exes/*-windows-x86_64/*.exe)"; mingw="$(ls exes/*-windows-mingw-x86_64/*.exe)"
+          echo "MSVC=$msvc" >> "$GITHUB_ENV"; echo "MINGW=$mingw" >> "$GITHUB_ENV"
+      - name: Sizes and imports
+        run: |
+          for e in "$MSVC" "$MINGW"; do
+            echo "== $e: $(stat -c %s "$e") bytes"
+            objdump -p "$e" 2>/dev/null | grep "DLL Name" || echo "(objdump unavailable)"
+            ls -la "$(dirname "$e")"
+          done
+      - name: Correctness (smoke + necpp testharness decks), each engine copy
+        run: |
+          mkdir decks; cp cli/scripts/smoke/*.nec decks/; cp necpp-src/testharness/data/*.nec decks/
+          for eng in baseline avx2; do
+            python cli/scripts/smoke/compare_exes.py --a "$MSVC" --a-label MSVC --b "$MINGW" --b-label MinGW \
+              --decks decks --engine $eng --timeout 300
+          done
+      - name: Timing (indicative; synthetic 4,333-segment whip-over-grid deck, 13 frequencies)
+        run: |
+          python cli/scripts/smoke/make_grid_deck.py > grid.nec
+          nproc 2>/dev/null || echo "$NUMBER_OF_PROCESSORS"
+          for label in MSVC MINGW; do
+            exe="${!label}"
+            for reuse in 0 1; do
+              [ "${{ matrix.variant }}" = accel ] && [ $reuse = 1 ] && continue
+              for k in 1 2; do
+                s=$(date +%s.%N)
+                PYNEC_FILL_REUSE=$reuse "$exe" -n -i grid.nec -o "grid-$label-$reuse.out"
+                e=$(date +%s.%N)
+                echo "TIMING variant=${{ matrix.variant }} build=$label PYNEC_FILL_REUSE=$reuse run=$k wall=$(python -c "print(f'{$e-$s:.2f}')") s"
+              done
+            done
+          done
+          python cli/scripts/smoke/compare_exes.py --a "$MSVC" --a-label MSVC --b "$MINGW" --b-label MinGW \
+            --decks grid.nec --timeout 600
 
   release:
     # Only on a cli-v* tag push, and only when the maintainer has opted in.
