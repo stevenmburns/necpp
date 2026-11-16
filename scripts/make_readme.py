@@ -62,10 +62,12 @@ def main() -> None:
   is redirected; else the two lines of nec2d.tmp in the exe's own folder,
   which 4nec2 writes before each run (paths relative to that folder). Names
   are trimmed of blanks, CR/LF and surrounding double quotes. The
-  wire-intersection check is off in that mode, as with -n. NECPP_VERBOSE=1
-  prints, on stderr only, which source was used and the resolved names.
-  Exit status 0 on success; a missing input prints a message on stderr and
-  exits non-zero.
+  wire-intersection check is off in that mode, as with -n, and the printout
+  is in NEC-2D's layout (the card echo, section titles, input-parameter and
+  radiation-pattern tables, and the closing RUN TIME line 4nec2 needs);
+  -d gives the same layout from the command line. NECPP_VERBOSE=1 prints, on
+  stderr only, which source was used and the resolved names. Exit status 0
+  on success; a missing input prints a message on stderr and exits non-zero.
 """
     else:
         fournec2 = f"""
@@ -101,6 +103,8 @@ Usage
   pynec-accel wheel's set_intersection_check(False)). -h lists the options.
 {fournec2}
 Threads
+  By default one thread per physical core that the process may run on (its
+  affinity mask: start /affinity, taskset), for the fill and the LU alike.
 {threads}
 
 CPU dispatch

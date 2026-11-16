@@ -13,9 +13,12 @@ and run with the names from each source: two positional arguments, stdin
 (redirected), and nec2d.tmp beside the executable (stdin a console / tty:
 a pty on Linux, NUL on Windows; and stdin redirected but empty, which falls
 through to nec2d.tmp). Each printout must be byte-identical to the one the
-same executable writes with `-n -i <deck> -o <out>`, apart from the timing
-lines; nothing may reach stdout; exit status 0. Error cases: a missing input
-exits non-zero with a message on stderr, and NECPP_VERBOSE=1 names the source.
+same executable writes with `-n -d -i <deck> -o <out>` (-d: the NEC-2D
+layout the 4nec2 mode prints), apart from the timing lines (and the closing
+RUN TIME line); nothing may reach stdout; exit status 0. The 4nec2-mode
+printout is also held to NEC-2D's text (nec2d_format.py), and the plain
+`-n -i -o` printout must carry none of it. Error cases: a missing input exits
+non-zero with a message on stderr, and NECPP_VERBOSE=1 names the source.
 
 The decks are the smoke decks plus cross.nec, whose two wires cross at their
 middles: nec2++'s intersection check refuses it, so it passing in every mode
@@ -34,7 +37,7 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-DECKS = ["dipole.nec", "yagi3-ground.nec", "cross.nec"]
+DECKS = ["dipole.nec", "yagi3-ground.nec", "cross.nec", "dipole-norm.nec"]
 WIN = os.name == "nt"
 EXT = ".exe" if WIN else ""
 SEP = "\\" if WIN else "/"
@@ -42,6 +45,16 @@ SEP = "\\" if WIN else "/"
 TIMING = re.compile(r"TIME|SECONDS|\bSEC\b|\bmsec\b|ELAPSED", re.I)
 
 failures: list[str] = []
+
+sys.path.insert(0, str(HERE))
+from nec2d_format import check_file as nec2d_check  # noqa: E402
+
+
+def deck_bytes(deck: str) -> bytes:
+    if deck == "dipole-norm.nec":
+        # the dipole with a normalized (total-gain) pattern: RP ... 1500
+        return (HERE / "dipole.nec").read_bytes().replace(b"RP 0 19 1 1000 0 0 10 0", b"RP 0 19 1 1500 0 0 10 0")
+    return (HERE / deck).read_bytes()
 
 
 def check(cond: bool, what: str) -> None:
@@ -75,6 +88,7 @@ def run(exe: Path, args: list[str], cwd: Path, stdin=subprocess.DEVNULL, data: b
 
 
 def same_printout(got: Path, ref: Path, label: str) -> None:
+    """Byte-identical apart from timing lines; the RUN TIME line counts as one."""
     if not got.exists():
         check(False, f"{label}: {got.name} was written")
         return
@@ -117,12 +131,17 @@ def main() -> None:
             stem = Path(deck).stem.upper()
             # 4nec2 writes .inp decks with CRLF line ends.
             inp = outdir / f"{stem}.inp"
-            inp.write_bytes(b"\r\n".join((HERE / deck).read_bytes().splitlines()) + b"\r\n")
+            inp.write_bytes(b"\r\n".join(deck_bytes(deck).splitlines()) + b"\r\n")
             print(f"{deck} -> {inp.name}")
 
             ref = outdir / f"{stem}-ref.out"
-            p = run(src_exe, ["-n", "-i", str(inp), "-o", str(ref)], cwd=root)
-            check(p.returncode == 0 and ref.exists(), f"reference -n -i -o run (exit {p.returncode})")
+            p = run(src_exe, ["-n", "-d", "-i", str(inp), "-o", str(ref)], cwd=root)
+            check(p.returncode == 0 and ref.exists(), f"reference -n -d -i -o run (exit {p.returncode})")
+            plain = outdir / f"{stem}-plain.out"
+            p = run(src_exe, ["-n", "-i", str(inp), "-o", str(plain)], cwd=root)
+            pt = plain.read_bytes() if plain.exists() else b""
+            check(p.returncode == 0 and b"*****  DATA CARD N0." in pt and b" RUN TIME =" not in pt
+                  and b"DATA CARD NO." not in pt, "plain -n -i -o printout keeps nec2++'s layout")
             if deck == "cross.nec":
                 q = run(src_exe, ["-i", str(inp), "-o", str(outdir / "check-on.out")], cwd=root)
                 check(q.returncode != 0, f"cross.nec is refused WITH the intersection check (exit {q.returncode})")
@@ -155,6 +174,9 @@ def main() -> None:
                 p = run(exe, [], cwd=other, use_pty=True)
                 quiet_ok(p, "nec2d.tmp (stdin a tty)")
             same_printout(o, ref, "nec2d.tmp")
+            if o.exists():
+                errs = nec2d_check(o, plain)
+                check(not errs, "4nec2-mode printout in NEC-2D format" + ("" if not errs else ": " + "; ".join(errs)))
 
             # 3b. stdin redirected but empty: falls through to nec2d.tmp.
             o.unlink(missing_ok=True)
@@ -189,7 +211,7 @@ def main() -> None:
         inp = outdir / "DIPOLE.inp"
         p = run(exe, [inp.name, "v.out"], cwd=outdir, env_extra={"NECPP_VERBOSE": "1"})
         err = p.stderr.decode(errors="replace")
-        check(p.returncode == 0 and "the command line" in err and "DIPOLE.inp" in err,
+        check(p.returncode == 0 and "the command line" in err and "DIPOLE.inp" in err and "input" in err,
               f"NECPP_VERBOSE=1 reports source and names on stderr ({err.strip()!r})")
         check(p.stdout == b"", "NECPP_VERBOSE=1: still nothing on stdout")
 
@@ -202,7 +224,28 @@ def main() -> None:
         o = outdir / "DIPOLE-i.out"
         p = run(exe, ["-n", "-i", inp.name, "-o", o.name], cwd=outdir, data=b"WRONG\nWRONG\n")
         quiet_ok(p, "-n -i -o under the nec2dxs name")
-        same_printout(o, outdir / "DIPOLE-ref.out", "-n -i -o under the nec2dxs name")
+        same_printout(o, outdir / "DIPOLE-plain.out", "-n -i -o under the nec2dxs name")
+
+    # Thread defaults follow the affinity mask (one per physical core in it);
+    # the environment still overrides.
+    print("thread defaults")
+    env = {k: v for k, v in os.environ.items() if k not in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS")}
+    env["NECPP_ENGINE_VERBOSE"] = "1"
+    p = subprocess.run([str(src_exe), "-v"], env=env, capture_output=True, stdin=subprocess.DEVNULL)
+    err = p.stderr.decode(errors="replace")
+    check("physical cores in the mask" in err, f"no thread variables: counts from the affinity mask ({err.strip()!r})")
+    p = subprocess.run([str(src_exe), "-v"], env={**env, "OMP_NUM_THREADS": "3", "OPENBLAS_NUM_THREADS": "2"},
+                       capture_output=True, stdin=subprocess.DEVNULL)
+    err = p.stderr.decode(errors="replace")
+    check("fill 3 (OMP_NUM_THREADS)" in err and "LU 2 (OPENBLAS_NUM_THREADS)" in err,
+          f"OMP_NUM_THREADS / OPENBLAS_NUM_THREADS override ({err.strip()!r})")
+    if hasattr(os, "sched_setaffinity"):
+        cpu = min(os.sched_getaffinity(0))
+        p = subprocess.run([str(src_exe), "-v"], env=env, capture_output=True, stdin=subprocess.DEVNULL,
+                           preexec_fn=lambda: os.sched_setaffinity(0, {cpu}))
+        err = p.stderr.decode(errors="replace")
+        check("fill 1 (" in err and "LU 1 (" in err and "mask: 1 CPUs" in err,
+              f"a one-CPU affinity mask gives one thread each ({err.strip()!r})")
 
     print(f"{'FAIL' if failures else 'PASS'}: {len(failures)} failure(s)")
     for f in failures:

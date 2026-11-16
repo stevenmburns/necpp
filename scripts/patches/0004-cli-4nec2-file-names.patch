@@ -11,25 +11,79 @@ index b2490b9..55770b9 100644
  
  nec2diff_SOURCES =  AntennaInput.h BaseInput.h CurrentInput.h necDiff.cpp PowerBudget.h RadiationInput.h
  
+diff --git a/src/c_geometry.cpp b/src/c_geometry.cpp
+index d26be08..4d3e330 100644
+--- a/src/c_geometry.cpp
++++ b/src/c_geometry.cpp
+@@ -3192,12 +3192,22 @@ void c_geometry::frequency_scale(nec_float freq_mhz)  {
+   nec_float fr = (1.0e6 * freq_mhz) / em::speed_of_light();
+   DEBUG_TRACE("       fr=(" << fr << ")");
+ 
++  /* NEC-2D layout: one summary line for the whole run instead of one per
++     segment per frequency (4nec2 shows the printout; nothing reads them). */
++  static bool nec2d_short_reported = false;
++  int n_short = 0;
++  nec_float shortest = 0.0;
+   for (int i = 0; i < n_segments; i++ )  {
+     x[i]= x_unscaled[i]* fr;
+     y[i]= y_unscaled[i]* fr;
+     z[i]= z_unscaled[i]* fr;
+     segment_length[i]= si_unscaled[i]* fr;
+     segment_radius[i]= bi_unscaled[i]* fr;
++    if (segment_length[i] < 0.02 && nec2d_layout)  {
++      if (n_short == 0 || segment_length[i] < shortest)
++        shortest = segment_length[i];
++      n_short++;
++    } else
+     if (segment_length[i] < 0.02)  {
+       m_output->nec_printf( "WARNING- SEGMENT[%i] LENGTH TOO SMALL (%f)\n",i,segment_length[i]);
+ /*      nec_exception* nex = new nec_exception("SCALE - SEGMENT[");
+@@ -3209,6 +3219,12 @@ void c_geometry::frequency_scale(nec_float freq_mhz)  {
+     }
+   }
+ 
++  if (n_short > 0 && !nec2d_short_reported)  {
++    m_output->nec_printf( "WARNING- %d SEGMENTS SHORTER THAN 0.02 WAVELENGTHS AT %.4E MHZ (SHORTEST %f);"
++      " LATER SUCH WARNINGS NOT PRINTED\n", n_short, freq_mhz, shortest);
++    nec2d_short_reported = true;
++  }
++
+   nec_float fr2 = fr*fr;
+   for (int i = 0; i < m; i++ )  {
+     px[i]= px_unscaled[i]* fr;
 diff --git a/src/misc.cpp b/src/misc.cpp
-index 4f3ab19..b1f441b 100644
+index 4f3ab19..d87f949 100644
 --- a/src/misc.cpp
 +++ b/src/misc.cpp
-@@ -19,6 +19,9 @@ void usage(void)
+@@ -19,9 +19,15 @@ void usage(void)
  {
    fprintf( stderr,
        "usage: nec2++ [-i<input-file-name>] [-o<output-file-name>]"
 +      "\n       nec2++ <input-file-name> <output-file-name>   (as 4nec2 runs nec2dxs;"
 +      "\n           with no -i the two names may also come from stdin or from"
-+      "\n           nec2d.tmp beside the executable; the intersection check is off)"
++      "\n           nec2d.tmp beside the executable; the intersection check is off and"
++      "\n           the printout is in NEC-2D layout, as with -d)"
        "\n       -g: print maximum gain to stdout."
        "\n       -b: Perform NEC++ Benchmark."
        "\n       -n: skip the wire-intersection check (NEC-2 does not make it)."
++      "\n       -d: NEC-2D printout layout (card echo, titles, input and pattern"
++      "\n           tables, RUN TIME line), as the 4nec2 mode prints."
+       "\n       -s: print result summary to standard output."
+       "\n       -c: print results in comma-separated-value (CSV) format,"
+       "\n           this options is used in conjunction with (-s) above."
 diff --git a/src/nec2cpp.cpp b/src/nec2cpp.cpp
-index 6b0fa9b..3aadd21 100644
+index 6b0fa9b..b85cb6e 100644
 --- a/src/nec2cpp.cpp
 +++ b/src/nec2cpp.cpp
-@@ -139,6 +139,7 @@ int readmn(FILE* input_fp, FILE* output_fp, char *gm, int *i1, int *i2, int *i3,
+@@ -54,6 +54,7 @@
+ #include <cstdlib>
+ #include <vector>
+ #include <string>
++#include <chrono>
+ 
+ using namespace std;
+ 
+@@ -139,9 +140,11 @@ int readmn(FILE* input_fp, FILE* output_fp, char *gm, int *i1, int *i2, int *i3,
  
  
  #include "XGetopt.h"
@@ -37,7 +91,11 @@ index 6b0fa9b..3aadd21 100644
  
  int nec_main( int argc, char **argv, nec_output_file& s_output )
  {
-@@ -192,7 +193,9 @@ int nec_main( int argc, char **argv, nec_output_file& s_output )
++	const std::chrono::steady_clock::time_point wall_start = std::chrono::steady_clock::now();
+ 	nec_output_flags s_output_flags;
+ 	FILE *input_fp=NULL;
+ 	FILE *output_fp=NULL;
+@@ -192,7 +195,9 @@ int nec_main( int argc, char **argv, nec_output_file& s_output )
  #endif
  
  	/*** command line arguments handler ***/
@@ -48,7 +106,27 @@ index 6b0fa9b..3aadd21 100644
  	{
  		usage();
  		exit(-1);
-@@ -259,6 +262,26 @@ int nec_main( int argc, char **argv, nec_output_file& s_output )
+@@ -204,7 +209,7 @@ int nec_main( int argc, char **argv, nec_output_file& s_output )
+ 	nec_context s_context;
+ 
+ 	/* process command line options */
+-	while( (option = XGetopt(argc, argv, "i:o:hvscxgbn") ) != -1 )
++	while( (option = XGetopt(argc, argv, "i:o:hvscxgbnd") ) != -1 )
+ 	{
+ 		switch( option )
+ 		{
+@@ -248,6 +253,10 @@ int nec_main( int argc, char **argv, nec_output_file& s_output )
+ 			check_intersections = false;
+ 			break;
+ 
++		case 'd' : /* NEC-2D printout layout, as the 4nec2 mode prints (nec2d_layout.h) */
++			nec2d_layout = true;
++			break;
++
+ 		case 'b' : /* Run benchmark */
+ 			benchmark();
+ 			exit(0);
+@@ -259,6 +268,27 @@ int nec_main( int argc, char **argv, nec_output_file& s_output )
  		}
  	}
  
@@ -69,12 +147,76 @@ index 6b0fa9b..3aadd21 100644
 +			if ( output_filename == "" )
 +				output_filename = nec2d_out;
 +			check_intersections = false;
++			nec2d_layout = true; /* 4nec2 reads NEC-2D's text */
 +		}
 +	}
 +
  	/*** open input file ***/
  	if ( input_filename == "" )
  	{
+@@ -406,6 +436,12 @@ int nec_main( int argc, char **argv, nec_output_file& s_output )
+ 			}
+ 
+ 			data_card_count++;
++			if ( nec2d_layout )
++			fprintf( output_fp,
++				"\n ***** DATA CARD NO.%3d   %-2.2s%4d%6d%6d%6d%13.5E%13.5E%13.5E%13.5E%13.5E%13.5E",
++				data_card_count, ain, itmp1, itmp2, itmp3, itmp4,
++				tmp1, tmp2, tmp3, tmp4, tmp5, tmp6 );
++			else
+ 			fprintf( output_fp,
+ 				"\n*****  DATA CARD N0. %3d "
+ 				"%s %3d %5d %5d %5d %12.5E %12.5E %12.5E %12.5E %12.5E %12.5E",
+@@ -552,6 +588,11 @@ int nec_main( int argc, char **argv, nec_output_file& s_output )
+ 				secnds( &tmp1 );
+ 				tmp1 -= ex_timer;
+ 				fprintf( output_fp, "\n\n  TOTAL RUN TIME: %d msec", (int)tmp1 );
++				/* NEC-2D's closing line, which 4nec2 requires (it reads the
++				   seconds from it): wall time since start-up. */
++				if ( nec2d_layout )
++					fprintf( output_fp, "\n\n RUN TIME = %9.3f\n",
++						std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count() );
+ 
+ 				if( input_fp != NULL )
+ 					fclose( input_fp );
+diff --git a/src/nec2d_layout.h b/src/nec2d_layout.h
+new file mode 100644
+index 0000000..ebdd38d
+--- /dev/null
++++ b/src/nec2d_layout.h
+@@ -0,0 +1,32 @@
++/*
++	nec2d_layout.h - the NEC-2D printout layout for the nec2++ command line.
++
++	Copyright (C) 2026  Steven Burns
++
++	This program is free software; you can redistribute it and/or modify
++	it under the terms of the GNU General Public License as published by
++	the Free Software Foundation; either version 2 of the License, or
++	(at your option) any later version.
++
++	This program is distributed in the hope that it will be useful,
++	but WITHOUT ANY WARRANTY; without even the implied warranty of
++	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++	GNU General Public License for more details.
++
++	4nec2 reads an engine's printout by NEC-2D's (NEC2DXS's) exact text:
++	its data-card echo, section titles, FREQUENCY and NORMALIZATION FACTOR
++	lines, the ANTENNA INPUT PARAMETERS and RADIATION PATTERNS tables in
++	fixed columns, and a closing RUN TIME line. With nec2d_layout set (the
++	4nec2 mode, or -d) nec2++ prints those parts that way, from the same
++	values; everything else keeps nec2++'s layout. Unset (the default) the
++	printout is unchanged.
++*/
++#ifndef NEC2D_LAYOUT_H
++#define NEC2D_LAYOUT_H
++
++extern bool nec2d_layout;
++
++/* NEC-2D's whole title line for a nec2++ section name, or 0. */
++const char* nec2d_title(const char* section);
++
++#endif /* NEC2D_LAYOUT_H */
 diff --git a/src/nec2d_names.cpp b/src/nec2d_names.cpp
 new file mode 100644
 index 0000000..6130e5f
@@ -431,3 +573,256 @@ index 0000000..1d4708c
 +}
 +
 +#endif /* NEC2D_NAMES_H */
+diff --git a/src/nec_context.cpp b/src/nec_context.cpp
+index e0bf379..05bc07d 100644
+--- a/src/nec_context.cpp
++++ b/src/nec_context.cpp
+@@ -1216,9 +1216,15 @@ void nec_context::print_freq_int_krnl(
+   bool using_extended_kernel)
+ {
+   m_output.end_section();
++  if (nec2d_layout) {
++    m_output.raw_line(nec2d_title("FREQUENCY"));
++    m_output.nec_printf("                                    FREQUENCY= %10.4E MHZ\n", f);
++    m_output.set_indent(31);
++  } else {
+   m_output.set_indent(31);
+   m_output.line("--------- FREQUENCY --------");
+   m_output.string("FREQUENCY= "); m_output.real_out(11,4,f); m_output.line(" MHZ");
++  }
+   m_output.string("WAVELENGTH="); m_output.real_out(11,4,lambda); m_output.line(" METERS");
+ 
+   m_output.endl(2);
+@@ -1466,7 +1472,19 @@ void nec_context::print_power_budget(void)
+     nec_float  efficiency = 100.0 * radiated_power/input_power;
+ 
+     m_output.endl(3);
+-    m_output.nec_printf(
++    if (nec2d_layout)
++      m_output.raw_line(nec2d_title("POWER BUDGET"));
++    m_output.nec_printf(nec2d_layout ?
++        "                               "
++        "INPUT POWER   = %11.4E Watts\n"
++        "                               "
++        "RADIATED POWER= %11.4E Watts\n"
++        "                               "
++        "STRUCTURE LOSS= %11.4E Watts\n"
++        "                               "
++        "NETWORK LOSS  = %11.4E Watts\n"
++        "                               "
++        "EFFICIENCY    = %7.2f Percent" :
+         "                               "
+         "---------- POWER BUDGET ---------\n"
+         "                               "
+@@ -1543,6 +1561,9 @@ void nec_context::structure_segment_loading()
+   nec_float tim1, tim, tim2;
+ 
+   m_output.end_section();
++  if (nec2d_layout)
++    m_output.raw_line(nec2d_title("STRUCTURE IMPEDANCE LOADING"));
++  else
+   m_output.line("                          ------ STRUCTURE IMPEDANCE LOADING ------" );
+ 
+   if ( nload != 0)
+@@ -1572,6 +1593,9 @@ void nec_context::structure_segment_loading()
+   }
+   
+   m_output.end_section();
++  if (nec2d_layout)
++    m_output.raw_line(nec2d_title("MATRIX TIMING"));
++  else
+   m_output.line("                             ---------- MATRIX TIMING ----------");
+   m_output.string("                               FILL= ");
+   m_output.integer(int(tim)); 
+diff --git a/src/nec_ground.cpp b/src/nec_ground.cpp
+index 8b8c7a2..c0e4f81 100644
+--- a/src/nec_ground.cpp
++++ b/src/nec_ground.cpp
+@@ -221,6 +221,9 @@ void nec_ground::calculate_antenna_environment(c_ground_wave& ground_wave, nec_f
+ void nec_ground::output_antenna_environment(nec_output_file& _output)
+ {
+   _output.end_section();
++  if (nec2d_layout)
++    _output.raw_line(nec2d_title("ANTENNA ENVIRONMENT"));
++  else
+   _output.line("                            -------- ANTENNA ENVIRONMENT --------" );
+   
+   if ( false == present()) {
+diff --git a/src/nec_output.cpp b/src/nec_output.cpp
+index 7f9dcd4..018424e 100644
+--- a/src/nec_output.cpp
++++ b/src/nec_output.cpp
+@@ -18,6 +18,7 @@
+ #include "nec_output.h"
+ #include "nec_exception.h"
+ #include <string>
++#include <cstring>
+ #include <sstream>
+ 
+ 
+@@ -59,6 +60,34 @@ void nec_output_file::endl(int n_lines)
+ 	m_require_indent = true;
+ }
+ 
++/* NEC-2D layout (nec2d_layout.h) */
++bool nec2d_layout = false;
++
++const char* nec2d_title(const char* section)
++{
++	static const char* const T[][2] = {
++		{ "FREQUENCY",                   "                                 - - - - - - FREQUENCY - - - - - -" },
++		{ "STRUCTURE IMPEDANCE LOADING", "                               - - - STRUCTURE IMPEDANCE LOADING - - -" },
++		{ "ANTENNA ENVIRONMENT",         "                                  - - - ANTENNA ENVIRONMENT - - -" },
++		{ "MATRIX TIMING",               "                                - - - MATRIX TIMING - - -" },
++		{ "ANTENNA INPUT PARAMETERS",    "                                          - - - ANTENNA INPUT PARAMETERS - - -" },
++		{ "CURRENTS AND LOCATION",       "                             - - - CURRENTS AND LOCATION - - -" },
++		{ "POWER BUDGET",                "                                        - - - POWER BUDGET - - -" },
++		{ "NORMALIZED GAIN",             "                                     - - - - NORMALIZED GAIN - - - -" },
++		{ "RADIATION PATTERNS",          "\n                                                - - - RADIATION PATTERNS - - -" },
++	};
++	for (size_t k = 0; k < sizeof T / sizeof T[0]; k++)
++		if (0 == strcmp(section, T[k][0]))
++			return T[k][1];
++	return 0;
++}
++
++void nec_output_file::raw_line(const char* in_str)
++{
++	do_output(in_str);
++	endl();
++}
++
+ void nec_output_file::end_section()
+ {
+ 	endl(3);
+diff --git a/src/nec_output.h b/src/nec_output.h
+index d1d01bb..7a34ff4 100644
+--- a/src/nec_output.h
++++ b/src/nec_output.h
+@@ -22,6 +22,7 @@
+ #include <stdio.h>
+ #include "math_util.h"
+ #include "nec_debug.h"
++#include "nec2d_layout.h"
+ 
+ class nec_output_flags
+ {
+@@ -71,6 +72,9 @@ public:
+   void set_error_mode(bool f);
+   
+   void nec_printf(const char* fmt, ...);
++
++  /* One whole line, ignoring the indent (NEC-2D layout titles). */
++  void raw_line(const char* in_str);
+                
+   FILE* get_fp() {
+     return m_output_fp;
+diff --git a/src/nec_radiation_pattern.cpp b/src/nec_radiation_pattern.cpp
+index 91ee367..26e86f6 100644
+--- a/src/nec_radiation_pattern.cpp
++++ b/src/nec_radiation_pattern.cpp
+@@ -141,10 +141,21 @@ void nec_radiation_pattern::write_to_file_aux(ostream& os)
+     
+     int itmp1 = 2 * m_rp_output_format;
+     int itmp2 = itmp1+1;
+-    
++
++    if (nec2d_layout && _result_format == RESULT_FORMAT_NEC)  {
++      /* NEC-2D's three header lines */
++      static const char* gax[4] = { "MAJOR", "MINOR", "VERT.", "HOR. " };
++      os << endl;
++      os << "  - - ANGLES - -           " << (m_rp_ipd ? "DIRECTIVE GAINS" : "- POWER GAINS -")
++         << "       - - - POLARIZATION - - -    - - - E(THETA) - - -    - - - E(PHI) - - -" << endl;
++      os << "  THETA     PHI        " << gax[itmp1] << "   " << gax[itmp2]
++         << "   TOTAL      AXIAL     TILT   SENSE     MAGNITUDE    PHASE      MAGNITUDE    PHASE " << endl;
++      os << " DEGREES  DEGREES       DB      DB      DB        RATIO     DEG.              VOLTS/M    DEGREES      VOLTS/M    DEGREES" << endl;
++    } else {
+     os << " ---- ANGLES -----     "; oh.string_out(23,gain_type[m_rp_ipd]); os << "      ---- POLARIZATION ----   ---- E(THETA) ----    ----- E(PHI) ------" << endl;
+     os << "  THETA      PHI      "; oh.string_out(6,igax[itmp1]); os << "  "; oh.string_out(6,igax[itmp2]); os << "   TOTAL       AXIAL      TILT  SENSE   MAGNITUDE    PHASE    MAGNITUDE     PHASE" << endl;
+     os << " DEGREES   DEGREES        DB       DB       DB       RATIO   DEGREES            VOLTS/M   DEGREES     VOLTS/M   DEGREES" << endl;
++    }
+   } /* if ( _ifar == 1) */
+ 
+ 
+@@ -182,7 +193,22 @@ void nec_radiation_pattern::write_to_file_aux(ostream& os)
+         nec_complex e_phi = _e_phi(kth, kph);
+         
+         const char* pol_sense = hpol[_polarization_sense_index(kth, kph)];
+-        
++
++        if (nec2d_layout && _result_format == RESULT_FORMAT_NEC)  {
++          /* NEC-2D: FORMAT(1X,F7.2,F9.2,3X,3F8.2,F11.5,F9.2,2X,A6,2(E15.5,F9.2)) */
++          char b[200];
++          snprintf(b, sizeof b, " %7.2f%9.2f   %8.2f%8.2f%8.2f%11.5f%9.2f  %-6.6s%15.5E%9.2f%15.5E%9.2f",
++            thet, phi, _power_gain_vert(kth, kph), _power_gain_horiz(kth, kph), _power_gain_tot(kth, kph),
++            _polarization_axial_ratio(kth, kph), _polarization_tilt(kth, kph),
++            (pol_sense[0] == ' ') ? "" : pol_sense,
++            abs(e_theta), arg_degrees(e_theta), abs(e_phi), arg_degrees(e_phi));
++          os << b << endl;
++          m_plot_card.plot_patterns(thet, phi,
++                  e_theta, e_phi,
++                  _power_gain_vert(kth, kph), _power_gain_horiz(kth, kph), _power_gain_tot(kth, kph));
++          continue;
++        }
++
+         oh.start_record();
+         oh.padding(" ");
+         oh.real_out(7,2,thet,false); oh.separator(); oh.real_out(9,2,phi,false); oh.separator();
+@@ -510,6 +536,11 @@ void nec_radiation_pattern::write_normalized_gain(ostream& os)
+   
+   oh.section_start("NORMALIZED GAIN");
+   { stringstream mess;  mess << norm_type << " GAIN";  oh.center_text(mess.str(), ""); }
++  if (nec2d_layout && _result_format == RESULT_FORMAT_NEC)  {
++    char b[120];
++    snprintf(b, sizeof b, "                                      NORMALIZATION FACTOR =%9.2f DB", normalization_factor);
++    os << b << endl;
++  } else
+   { stringstream mess;  mess << "NORMALIZATION FACTOR: " << normalization_factor << " dB"; oh.center_text(mess.str(), ""); }
+ /*  os << "                                      " << norm_type << " GAIN" << endl;
+   os << "                                   NORMALIZATION FACTOR: "; oh.real_out(7,2,normalization_factor,false); os << " db" << endl << endl; */
+diff --git a/src/nec_results.h b/src/nec_results.h
+index 82f4844..f7f5bb4 100644
+--- a/src/nec_results.h
++++ b/src/nec_results.h
+@@ -25,6 +25,8 @@
+ #include <string>
+ 
+ #include "math_util.h"
++#include "nec2d_layout.h"
++#include <cstdio>
+ using namespace std;
+ 
+ enum RESULT_FORMAT {
+@@ -119,7 +121,10 @@ public:
+     switch (m_format)  {
+       case RESULT_FORMAT_NEC:
+         os << endl << endl << endl;
+-        center_text(section_name, "-----");
++        if (nec2d_layout && nec2d_title(section_name.c_str()))
++          os << nec2d_title(section_name.c_str()) << endl;
++        else
++          center_text(section_name, "-----");
+         break;
+ 
+       case RESULT_FORMAT_XML:
+@@ -578,6 +583,20 @@ public:
+       
+     output_helper oh(os,_result_format);
+     oh.section_start("ANTENNA INPUT PARAMETERS");
++    if (nec2d_layout && _result_format == RESULT_FORMAT_NEC)  {
++      /* NEC-2D: 2(1X,I5),9E12.5 -- the columns run together */
++      os << endl;
++      os << "   TAG   SEG.    VOLTAGE (VOLTS)         CURRENT (AMPS)         IMPEDANCE (OHMS)        ADMITTANCE (MHOS)      POWER" << endl;
++      os << "   NO.   NO.    REAL        IMAG.       REAL        IMAG.       REAL        IMAG.       REAL        IMAG.     (WATTS)" << endl;
++      for (int i=0; i<n_items; i++)  {
++        char b[160];
++        snprintf(b, sizeof b, " %5d %5d%12.5E%12.5E%12.5E%12.5E%12.5E%12.5E%12.5E%12.5E%12.5E",
++          _tag[i], _segment[i], real(_voltage[i]), imag(_voltage[i]), real(_current[i]), imag(_current[i]),
++          real(_impedance[i]), imag(_impedance[i]), real(_admittance[i]), imag(_admittance[i]), _power[i]);
++        os << b << endl;
++      }
++      return;
++    }
+     os << "  TAG   SEG       VOLTAGE (VOLTS)         CURRENT (AMPS)         IMPEDANCE (OHMS)        ADMITTANCE (MHOS)     POWER" << endl;
+     os << "  NO.   NO.     REAL      IMAGINARY     REAL      IMAGINARY     REAL      IMAGINARY    REAL       IMAGINARY   (WATTS)" << endl;
+     for (int i=0; i<n_items; i++)  {

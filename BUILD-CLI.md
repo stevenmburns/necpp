@@ -29,10 +29,12 @@ Patches applied to a copy of the tree (never to the checkout):
   empty unless the dispatch build defines it, so it is the original code.
 - `scripts/patches/0004-cli-4nec2-file-names.patch` (both): the file-name
   conventions 4nec2 uses with its NEC-2 engines, so the exe can be installed
-  as 4nec2's `nec2dxs*.exe` with no shim. See "4nec2" below. Adds
-  `src/nec2d_names.{h,cpp}` (also listed in `src/Makefile.am`, so a plain
-  autotools build gets it too) and a call from `nec_main`; nothing changes
-  when `-i` is given.
+  as 4nec2's `nec2dxs*.exe` with no shim, and the NEC-2D printout layout
+  4nec2 reads. See "4nec2" below. Adds `src/nec2d_names.{h,cpp}` (also
+  listed in `src/Makefile.am`, so a plain autotools build gets it too) and
+  `src/nec2d_layout.h`, a call from `nec_main`, a new `-d` flag, and
+  `if (nec2d_layout)` branches at the printout sites. Without `-d`, and
+  with `-i` given, the printout is byte-identical to before.
 
 ## Why a script and not autotools
 
@@ -103,9 +105,8 @@ build used 14.2.1). OpenBLAS is built from source:
   executable OpenBLAS's constructor runs before libgomp's has read
   `OMP_NUM_THREADS`; OpenBLAS then records one OpenMP thread as its maximum
   and runs the LU serially (zgetrf on the whip deck: 4.7 s instead of 1.4 s
-  at 4 threads, with nothing said). The dispatcher calls
-  `openblas_set_num_threads()` before the engine runs, with
-  `OPENBLAS_NUM_THREADS` if set, else `omp_get_max_threads()`.
+  at 4 threads, with nothing said). The dispatcher therefore always calls
+  `openblas_set_num_threads()` before the engine runs (see "Thread counts").
 - libgomp's offload-plugin loader links `dlopen`, so the link warns that a
   static `dlopen` needs the build's glibc at run time. No plugin is ever
   loaded (there are no offload targets), so it is never called.
@@ -140,6 +141,25 @@ python scripts/build_cli.py --variant accel --src necpp-src --out out --work wor
 The zip ships `libscipy_openblas*.dll` and `vcomp140.dll` (the MSVC OpenMP
 runtime has no static form) beside the `.exe`; `scripts/check_imports.py`
 asserts that nothing else outside Windows itself is imported.
+
+## Thread counts (every build, every mode)
+
+The dispatcher sets both pools before the engine runs. Default: **one
+thread per physical core in the process's affinity mask**
+(`GetProcessAffinityMask` + `GetLogicalProcessorInformationEx` on Windows,
+`sched_getaffinity` + `thread_siblings_list` on Linux), for the OpenMP fill
+and the OpenBLAS LU alike, as momwire's standalone launchers count them
+(momwire#1952). `OMP_NUM_THREADS` still sets the fill, and
+`OPENBLAS_NUM_THREADS` the LU (else `OMP_NUM_THREADS`).
+`NECPP_ENGINE_VERBOSE=1` reports the counts and where they came from.
+
+Why: 4nec2 under a 4-CPU mask (0x55) with no thread variables started 36
+threads and ran past 204 s on the whip deck; with the variables at 4 it took
+23-27 s. The OpenMP and OpenBLAS defaults count every CPU in the machine,
+not the mask. The default also drops SMT siblings, so on an SMT machine with
+no variables set the count halves from before (Haswell: 8 -> 4); a few
+decks' last printed digits move with the thread count (the fill's parallel
+sums), exactly as they do when `OMP_NUM_THREADS` is changed by hand.
 
 ## 4nec2 (patch 0004)
 
@@ -181,8 +201,60 @@ wire-intersection check is off in this mode (as with `-n`). An explicit
   from inside either namespace reach the one definition) and it includes
   `<windows.h>`, which must stay out of the namespace wrappers.
 - Caveat: a host that redirects stdin to a pipe and never writes or closes
-  it would block the read in step 2. No evidence that 4nec2 does that (the
-  shim this replaces read stdin under the same rule).
+  it would block the read in step 2. 4nec2 does not: observed, it redirects
+  stdin from a FILE (`FILE_TYPE_DISK`) holding the same two CRLF lines as
+  `nec2d.tmp`, runs the bare exe name with no arguments, from cwd
+  `C:\4nec2\exe`, and needs no side files. Whether it checks the exit
+  status is not known (every observed run exited 0).
+
+### The NEC-2D printout layout (4nec2 mode, or `-d`)
+
+4nec2 reads the engine's printout by NEC-2D's exact text, and refuses or
+misreads nec2++'s own layout. Observed with 4nec2 itself (Windows-builder,
+with Steve at the GUI), bisected where noted:
+
+- **The closing RUN TIME line is required**: without it every run is
+  rejected ("NEC error ? Check output (F8)"). `"\n\n RUN TIME = %9.3f\n"`,
+  wall seconds, at the very end of the file; nec2++'s own
+  `TOTAL RUN TIME: ... msec` (kept, just before it) is not recognised.
+- **The data-card echo is required** for both the pattern and the SWR plot:
+  `" ***** DATA CARD NO.%3d   %-2.2s%4d%6d%6d%6d"` + 6 x `"%13.5E"`.
+- **The ANTENNA INPUT PARAMETERS body** is read in fixed columns (else
+  "terrible SWR everywhere"): a blank line after the title, NEC-2D's two
+  header lines, rows `" %5d %5d"` + 9 x `"%12.5E"` (the columns run
+  together).
+- **RADIATION PATTERNS**: NEC-2D's title (after a blank line), a blank
+  line, its three header lines (`VERT.`/`HOR.` or `MAJOR`/`MINOR` by the RP
+  card's X digit), rows
+  `FORMAT(1X,F7.2,F9.2,3X,3F8.2,F11.5,F9.2,2X,A6,2(E15.5,F9.2))`, the sense
+  blank where nec2++ has none.
+- Not bisected, emitted as the shim did: NEC-2D's section titles for
+  FREQUENCY, STRUCTURE IMPEDANCE LOADING, ANTENNA ENVIRONMENT, MATRIX
+  TIMING, CURRENTS AND LOCATION, POWER BUDGET and NORMALIZED GAIN;
+  `"FREQUENCY= %10.4E MHZ"` (36 leading blanks); `"NORMALIZATION FACTOR
+  =%9.2f DB"`.
+- **Short-segment warnings**: one summary line per run
+  (`WARNING- n SEGMENTS SHORTER THAN 0.02 WAVELENGTHS AT f MHZ ...`) in
+  place of one per segment per frequency (51 x 36 = 1,836 lines on a sane
+  inverted V). They were shown not to cause the rejection; it is noise.
+
+Everything is printed **from the values**, not re-parsed from nec2++'s
+text (as the shim had to), so the NEC-2D fields carry their full precision.
+Still in nec2++'s layout, and not exercised by any 4nec2 view so far: the
+currents, segmentation and structure tables, the normalized-gain table body
+(nec2++ prints one point per row, NEC-2D three), the near-ground field
+table, and the RANGE lines of a pattern at a finite range.
+
+Exponents: every build prints two exponent digits (`E+02`), as NEC-2D
+does. MSVC's UCRT and glibc do by default; MinGW's msvcrt `printf` would
+print three (`E+002`), so the MinGW build compiles with
+`-D__USE_MINGW_ANSI_STDIO=1` (MinGW-w64's own C99 printf).
+
+The mode is a global flag (`nec2d_layout`, `src/nec2d_layout.h`, defined
+in `nec_output.cpp`) set by the 4nec2 file-name mode or by `-d`; each
+printout site that differs has an `if (nec2d_layout)` branch, and
+`nec2d_title()` maps nec2++'s section names to NEC-2D's title lines. In the
+dispatch build each engine copy has its own flag, set by its own `nec_main`.
 
 `scripts/smoke/check_nec2d.py --exe <nec2++>` copies the exe, with any DLLs
 beside it, into a 4nec2-like layout (`exe/nec2dxs1K5.exe`, `out/*.inp` with
@@ -190,8 +262,19 @@ CRLF) and runs it with each source: arguments, redirected stdin (quoted,
 padded, CRLF names; beating a stale `nec2d.tmp`), and `nec2d.tmp` with a
 console stdin (a pty on Linux, `NUL` on Windows), with an empty redirected
 stdin, and from the exe's directory. Each printout must be byte-identical to
-the same exe's `-n -i -o` printout apart from the timing lines (`FILL=`
-/ `FACTOR:` msec and the run time), stdout must be empty, and the status 0.
+the same exe's `-n -d -i -o` printout apart from the timing lines (`FILL=`
+/ `FACTOR:` msec and the run times), stdout must be empty, and the status 0.
+The 4nec2-mode printout is held line by line to NEC-2D's text by
+`scripts/smoke/nec2d_format.py`: each card echo, FREQUENCY, NORMALIZATION,
+impedance and pattern line is cut at NEC-2D's column widths and re-printed
+with NEC-2D's format from the values read back, and must come out
+identical; the headers and titles must match exactly, nec2++'s own titles
+must be gone, the file must end in the RUN TIME line, and the impedances
+must round to the plain printout's. The plain `-n -i -o` printout must keep
+nec2++'s layout. A fourth deck, the dipole with a normalized pattern
+(`RP ... 1500`), covers NORMALIZED GAIN. The thread defaults are checked
+too: counts from the mask with no variables, the variables overriding, and
+(Linux) one thread each under a one-CPU mask.
 `cross.nec` (two wires crossing mid-segment) is in the set because the
 intersection check refuses it, so it passing shows the check is off. It also
 checks the missing-input errors (all three sources), `NECPP_VERBOSE`, the
