@@ -270,7 +270,8 @@ jobs:
         run: |
           for e in "$MSVC" "$MINGW"; do
             echo "== $e: $(stat -c %s "$e") bytes"
-            dumpbin /nologo /dependents "$e" | sed -n '/following dependencies/,/Summary/p'
+            # Git Bash would rewrite /nologo into a path: MSYS_NO_PATHCONV.
+            MSYS_NO_PATHCONV=1 dumpbin /nologo /dependents "$e" | sed -n '/following dependencies/,/Summary/p'
             ls -la "$(dirname "$e")"
           done
       - name: Correctness (smoke + necpp testharness decks), each engine copy
@@ -284,16 +285,25 @@ jobs:
       - name: Timing (indicative; synthetic 4,333-segment whip-over-grid deck, 13 frequencies)
         run: |
           python cli/scripts/smoke/make_grid_deck.py > grid.nec
-          nproc 2>/dev/null || echo "$NUMBER_OF_PROCESSORS"
+          echo "CPUs: $NUMBER_OF_PROCESSORS"
+          NECPP_ENGINE_VERBOSE=1 "$MINGW" -v
+          # Each build at its default thread count (one per physical core in
+          # the mask) and at OMP_NUM_THREADS=4 (every vCPU), twice each.
           for label in MSVC MINGW; do
             exe="${!label}"
             for reuse in 0 1; do
               [ "${{ matrix.variant }}" = accel ] && [ $reuse = 1 ] && continue
-              for k in 1 2; do
-                s=$(date +%s.%N)
-                PYNEC_FILL_REUSE=$reuse "$exe" -n -i grid.nec -o "grid-$label-$reuse.out"
-                e=$(date +%s.%N)
-                echo "TIMING variant=${{ matrix.variant }} build=$label PYNEC_FILL_REUSE=$reuse run=$k wall=$(python -c "print(f'{$e-$s:.2f}')") s"
+              for thr in default 4; do
+                for k in 1 2; do
+                  s=$(date +%s.%N)
+                  if [ $thr = default ]; then
+                    PYNEC_FILL_REUSE=$reuse "$exe" -n -i grid.nec -o "grid-$label-$reuse.out"
+                  else
+                    OMP_NUM_THREADS=$thr PYNEC_FILL_REUSE=$reuse "$exe" -n -i grid.nec -o "grid-$label-$reuse.out"
+                  fi
+                  e=$(date +%s.%N)
+                  echo "TIMING variant=${{ matrix.variant }} build=$label PYNEC_FILL_REUSE=$reuse threads=$thr run=$k wall=$(python -c "print(f'{$e-$s:.2f}')") s"
+                done
               done
             done
           done
