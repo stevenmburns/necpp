@@ -89,7 +89,9 @@ build used 14.2.1). OpenBLAS is built from source:
   `cd7e129868320cc2d033afa920e31202dfe0b8066a5b66661900ccc0f197dfed`
   (the release page's asset digest; the script refuses any other).
 - `make DYNAMIC_ARCH=1 TARGET=PRESCOTT USE_OPENMP=1 NO_SHARED=1 NUM_THREADS=64
-  NOFORTRAN=1 C_LAPACK=1 BUILD_TESTING=0 NO_AFFINITY=1 libs netlib`, then
+  NOFORTRAN=1 C_LAPACK=1 BUILD_TESTING=0 NO_AFFINITY=1 libs`, then the same
+  with `netlib` (two runs: under one parallel make both targets append to the
+  same archive at once, which fails on Windows), then
   `make ... PREFIX=<prefix> install`.
   - `USE_OPENMP=1`: OpenBLAS and the fill share one libgomp.
   - `NUM_THREADS=64`: the default is the build machine's core count.
@@ -207,8 +209,10 @@ the six names; the README says the same for anyone copying by hand.
 ## Windows: MinGW-w64, one static file
 
 `--toolchain mingw` (the default in an MSYS2 **MINGW64** shell) builds one
-self-contained `.exe` that imports only `KERNEL32.dll` and `msvcrt.dll`, as
-Ward's NEC5CL builds do. MINGW64's runtime is the system `msvcrt.dll`
+self-contained `.exe` that imports only `KERNEL32.dll` and `msvcrt.dll`: the
+shape of Ward's NEC5CL build (m90; measured on its stand-in `NEC5CL_m85.exe`,
+whose `dumpbin /dependents` lists just those two, 14.2 MB). Not every NEC5CL build is like that: `NEC5CL_a51.exe` also imports
+`libiomp5md.dll` (Intel OpenMP) and `imagehlp.dll`. MINGW64's runtime is the system `msvcrt.dll`
 (not the UCRT), present on every Windows since XP.
 
 - Toolchain: MSYS2 MINGW64 `mingw-w64-x86_64-gcc` (on GitHub's

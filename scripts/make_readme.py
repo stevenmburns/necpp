@@ -24,7 +24,8 @@ def main() -> None:
     if a.os == "windows-mingw":
         runtime = ("One self-contained .exe (MinGW-w64 GCC, MSYS2 MINGW64, everything static): it\n"
                    "  imports only KERNEL32.dll and msvcrt.dll, both part of Windows since Windows 7 or\n"
-                   "  earlier, and nothing else needs to sit beside it.")
+                   "  earlier, and nothing else needs to sit beside it (the same shape as Ward's\n"
+                   "  NEC5CL build: m85, the stand-in for m90, imports only those two).")
     elif a.os == "windows":
         runtime = ("Ships with libscipy_openblas*.dll (OpenBLAS, from the scipy-openblas32 wheel, as the\n"
                    "pynec-accel Windows wheels use) and vcomp140.dll (the MSVC OpenMP runtime) beside\n"

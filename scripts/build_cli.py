@@ -250,8 +250,24 @@ def build_openblas(work: Path, prefix: Path, jobs: int, cc: str) -> None:
     logpath = work / "openblas-build.log"
     try:
         with open(logpath, "w") as log:
-            subprocess.run(["make", f"-j{jobs}", *flags, "libs", "netlib"], cwd=srcdir,
-                           stdout=log, stderr=subprocess.STDOUT, check=True)
+            # libs and netlib one after the other: under one parallel make
+            # both append to the same libopenblas*.a at once. On Windows that
+            # fails outright (ar: "cause of error unknown", a sharing
+            # violation); elsewhere it is a race on the archive's members.
+            # A Windows runner's on-access scanner can also hold the archive
+            # for a moment; make is incremental and ar -ru idempotent, so a
+            # failed run is retried (twice) before giving up.
+            for target in ("libs", "netlib"):
+                for attempt in range(3):
+                    r = subprocess.run(["make", f"-j{jobs}", *flags, target], cwd=srcdir,
+                                       stdout=log, stderr=subprocess.STDOUT)
+                    if r.returncode == 0:
+                        break
+                    print(f"OpenBLAS make {target}: attempt {attempt + 1} failed", flush=True)
+                    log.write(f"\n=== retrying make {target} ===\n")
+                    log.flush()
+                else:
+                    raise subprocess.CalledProcessError(r.returncode, r.args)
             subprocess.run(["make", *flags, f"PREFIX={prefix}", "install"], cwd=srcdir,
                            stdout=log, stderr=subprocess.STDOUT, check=True)
     except subprocess.CalledProcessError:
