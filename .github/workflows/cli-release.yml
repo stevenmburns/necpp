@@ -21,7 +21,7 @@ name: cli-release
 on:
   workflow_dispatch:
   push:
-    branches: [cli-build, cli-4nec2-static]
+    branches: [cli-build]
     tags: ["cli-v*"]
 
 permissions:
