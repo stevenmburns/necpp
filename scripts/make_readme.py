@@ -113,7 +113,7 @@ Threads
   | NEC Engine | Operating System | CPU | Calculation Time |
   |---|---|---|---|
   | NEC2/MP v. 1.50, by Athan Papadimitriou | Windows 11 Pro 26H2 (build 26300), 64 bit | Dell XPS 9320, Intel Core i5-1240P @1.7 GHz (4.4 GHz turbo), 12 cores (4P+8E), 16 threads, 16 GB RAM, CPU Mark = 15655 | 43.7 seconds |
-  | nec2++ accel + fill reuse, cli-v1.1.0 (MSVC build), based on NEC2++ by Tim Molteno | Windows 11 Pro 26H2 (build 26300), 64 bit | Dell XPS 9320, Intel Core i5-1240P @1.7 GHz (4.4 GHz turbo), 12 cores (4P+8E), 16 threads, 16 GB RAM, CPU Mark = 15655 | 17.6 seconds |
+  | nec2++ accel + fill reuse, cli-v1.1.0 (MSVC build), by Steve Burns, based on NEC2++ by Tim Molteno | Windows 11 Pro 26H2 (build 26300), 64 bit | Dell XPS 9320, Intel Core i5-1240P @1.7 GHz (4.4 GHz turbo), 12 cores (4P+8E), 16 threads, 16 GB RAM, CPU Mark = 15655 | 17.6 seconds |
 
   Benchmark 2, the whip on a ground plane: whip_antenna_8ft_groundplane.nec
   4392 segments, 13 steps 400-412 MHz, elevation plot at 2 degrees
@@ -121,7 +121,7 @@ Threads
   | NEC Engine | Operating System | CPU | Calculation Time |
   |---|---|---|---|
   | NEC2/MP v. 1.50, by Athan Papadimitriou | Windows 11 Pro 26H2 (build 26300), 64 bit | Dell XPS 9320, Intel Core i5-1240P @1.7 GHz (4.4 GHz turbo), 12 cores (4P+8E), 16 threads, 16 GB RAM, CPU Mark = 15655 | 75.3 seconds |
-  | nec2++ accel + fill reuse, cli-v1.1.0 (MSVC build), based on NEC2++ by Tim Molteno | Windows 11 Pro 26H2 (build 26300), 64 bit | Dell XPS 9320, Intel Core i5-1240P @1.7 GHz (4.4 GHz turbo), 12 cores (4P+8E), 16 threads, 16 GB RAM, CPU Mark = 15655 | 25.1 seconds |
+  | nec2++ accel + fill reuse, cli-v1.1.0 (MSVC build), by Steve Burns, based on NEC2++ by Tim Molteno | Windows 11 Pro 26H2 (build 26300), 64 bit | Dell XPS 9320, Intel Core i5-1240P @1.7 GHz (4.4 GHz turbo), 12 cores (4P+8E), 16 threads, 16 GB RAM, CPU Mark = 15655 | 25.1 seconds |
 
   4NEC2 defaults; Windows power mode: Best performance.
 
@@ -151,8 +151,9 @@ Threads
 {guide}
 What it is
   NEC2++ (GPL-2.0-or-later, Timothy C.A. Molteno and contributors) from the
-  fork {REPO}, built with the same engine configuration as the pynec-accel
-  Python wheel: the matrix fill parallelised with OpenMP and the LU solve
+  fork {REPO}. The accelerated engine (parallel fill, OpenBLAS LU, fill-pair
+  reuse) and this command-line build are by Steve Burns. It is built with the
+  same engine configuration as the pynec-accel Python wheel: the matrix fill parallelised with OpenMP and the LU solve
   through LAPACKE (zgetrf/zgetrs) in OpenBLAS.
   {"Fill-pair reuse is ON by default in this build (PYNEC_FILL_REUSE=0 turns it off)." if reuse else ""}
 

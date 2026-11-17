@@ -1,6 +1,6 @@
 # NEC2++ Numerical Electromagnetic Code in C++
 
-> **Fork notice.** This is a modified fork of
+> **Fork notice.** This is a modified fork, by Steve Burns, of
 > [tmolteno/necpp](https://github.com/tmolteno/necpp), adding an
 > OpenMP-parallelised matrix fill, a LAPACKE solve path (so a tuned BLAS such as
 > OpenBLAS or MKL can be linked), and MSVC build portability. It remains licensed
