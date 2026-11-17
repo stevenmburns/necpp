@@ -130,7 +130,10 @@ def run_masked(exe: Path, mask: int, deck: Path, extra: dict | None = None):
             for m, c in count.items():
                 peak[m] = max(peak.get(m, 0), c)
             peak_total = max(peak_total, len(starts))
-            peak_ours = max(peak_ours, len(starts) - count.get("ntdll.dll", 0))
+            # "?": a thread whose start address could not be read or lies in
+            # no listed module (it was exiting, or the module list raced the
+            # loader); counted in the report but not against the budget.
+            peak_ours = max(peak_ours, len(starts) - count.get("ntdll.dll", 0) - count.get("?", 0))
             time.sleep(0.02)
         err = p.stderr.read().decode(errors="replace")
         if p.returncode != 0:
