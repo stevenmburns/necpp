@@ -1,0 +1,5 @@
+vcomp140.dll (the Microsoft Visual C++ OpenMP runtime) and any other
+Microsoft Visual C++ runtime DLL shipped beside nec2++.exe are
+"Distributable Code" under the Microsoft Visual Studio licence terms, taken
+unmodified from the Visual Studio redist directory of the build machine.
+They are Microsoft's, not covered by the GPL that covers nec2++.

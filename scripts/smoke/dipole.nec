@@ -1,0 +1,8 @@
+CM Half-wave dipole in free space, 14.2 MHz (nec2++ CLI smoke test)
+CE
+GW 1 21 0 0 -5.0 0 0 5.0 0.001
+GE 0
+EX 0 1 11 0 1 0
+FR 0 1 0 0 14.2 0
+RP 0 19 1 1000 0 0 10 0
+EN
