@@ -379,7 +379,7 @@ open with two sections written for 4nec2 users, not developers: **using
 nec2++ with 4nec2** (what it is, MSVC vs MinGW, `install-4nec2.cmd`, what it
 backs up and how to go back, threads) and **benchmarking against NEC2/MP**
 (default settings, the deck's own sweep, the `RUN TIME =` line, best of 3,
-"Best performance" power mode, a results table still marked TBD). A note to
+"Best performance" power mode, and W8IO-format results tables for his two decks). A note to
 users can say "follow the README".
 
 ## Smoke test
