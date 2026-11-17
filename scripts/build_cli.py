@@ -577,9 +577,21 @@ def main() -> None:
         dll = next(Path(ob.get_lib_dir()).parent.rglob(f"{ob_name}*.dll"), None) or next(
             Path(ob.__file__).parent.rglob("*.dll"))
         # Delay-loaded: the dispatcher sets OPENBLAS_NUM_THREADS before the
-        # DLL starts its thread pool (see NECPP_OPENBLAS_DELAYLOADED).
+        # DLL starts its thread pool (see NECPP_OPENBLAS_DELAYLOADED). The
+        # wheel's import library is GNU dlltool's, which link.exe cannot
+        # delay-load ("LNK4199: no imports found"), so an MSVC import
+        # library is made from the DLL's own export table.
+        exp = subprocess.run(["dumpbin", "/nologo", "/exports", str(dll)], capture_output=True, text=True,
+                             check=True).stdout
+        names = re.findall(r"^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)", exp, re.M)
+        if not names:
+            sys.exit(f"no exports read from {dll}")
+        deff = objdir / "openblas_delay.def"
+        deff.write_text(f"LIBRARY {dll.name}\nEXPORTS\n" + "".join(f"  {n}\n" for n in names))
+        implib = objdir / "openblas_delay.lib"
+        run(["lib", "/nologo", f"/def:{deff}", "/machine:x64", f"/out:{implib}"])
         run(["cl", "/nologo", "/MT", "/openmp", *map(str, objs), f"/Fe{exe}",
-             "/link", f"/LIBPATH:{ob_lib}", f"{ob_name}.lib", f"/DELAYLOAD:{dll.name}", "delayimp.lib"])
+             "/link", str(implib), f"/DELAYLOAD:{dll.name}", "delayimp.lib"])
         shutil.copy2(dll, out / dll.name)
         print(f"bundled {dll.name}")
         # The wheel's licence file (OpenBLAS + the runtimes inside its DLL).
