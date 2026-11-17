@@ -87,12 +87,16 @@ Threads
 
 2. BENCHMARKING AGAINST NEC2/MP (OR 4NEC2'S OWN ENGINE)
 -------------------------------------------------------
+  The decks and the method are W8IO's: https://www.w8io.com/nec-benchmarks.htm
+  In 4nec2: Calculate -> NEC Output Data -> Use Original File -> Generate,
+  then read the total calculation time.
+
   - Run the same deck with each engine, at 4nec2's default settings.
     Nothing tuned.
-  - Use the deck's own frequency and pattern settings. Do not re-type a sweep
-    in 4nec2, so that 4nec2 does not rewrite the deck.
-  - Read the time from the "RUN TIME =" line at the end of the output (F8):
-    that is the number 4nec2 shows.
+  - Use Original File, so the deck's own frequency and pattern settings are
+    used and 4nec2 does not rewrite the deck.
+  - The time 4nec2 shows comes from the "RUN TIME =" line at the end of the
+    output (F8).
   - Take the best of 3 runs. Expect about 10-15 % spread from run to run.
   - Set the Windows power mode to "Best performance" first. On our test it
     changed NEC2/MP's time by about 30 %.
@@ -100,11 +104,23 @@ Threads
     the engine inherits 4nec2's CPU affinity, so starting 4nec2 with
     "start /affinity ..." limits the engine too.)
 
-  Results, i5-1240P laptop, 4nec2 defaults (seconds, best of 3):
+  Benchmark 1, LPDA: LogYag220-520-15dbi.nec
+  1353 segments, 65 steps 200-520 MHz, azimuth plot at 2 degrees
 
-    deck                                       NEC2/MP   nec2++ MSVC   nec2++ MinGW
-    ELT whip (4,392 segments, 13 frequencies)    TBD         TBD           TBD
-    LogYag (65 frequencies)                      TBD         TBD           TBD
+  | NEC Engine | Operating System | CPU | Calculation Time |
+  |---|---|---|---|
+  | NEC2/MP v. 1.50, by Athan Papadimitriou | Windows 11 Pro 26H2 (build 26300), 64 bit | Dell XPS 9320, Intel Core i5-1240P @1.7 GHz (4.4 GHz turbo), 12 cores (4P+8E), 16 threads, 16 GB RAM | TBD seconds |
+  | nec2++ accel + fill reuse, cli-v1.1.0 (MSVC build), based on NEC2++ by Tim Molteno | Windows 11 Pro 26H2 (build 26300), 64 bit | Dell XPS 9320, Intel Core i5-1240P @1.7 GHz (4.4 GHz turbo), 12 cores (4P+8E), 16 threads, 16 GB RAM | TBD seconds |
+
+  Benchmark 2, the whip on a ground plane: whip_antenna_8ft_groundplane.nec
+  4392 segments, 13 steps 400-412 MHz, elevation plot at 2 degrees
+
+  | NEC Engine | Operating System | CPU | Calculation Time |
+  |---|---|---|---|
+  | NEC2/MP v. 1.50, by Athan Papadimitriou | Windows 11 Pro 26H2 (build 26300), 64 bit | Dell XPS 9320, Intel Core i5-1240P @1.7 GHz (4.4 GHz turbo), 12 cores (4P+8E), 16 threads, 16 GB RAM | TBD seconds |
+  | nec2++ accel + fill reuse, cli-v1.1.0 (MSVC build), based on NEC2++ by Tim Molteno | Windows 11 Pro 26H2 (build 26300), 64 bit | Dell XPS 9320, Intel Core i5-1240P @1.7 GHz (4.4 GHz turbo), 12 cores (4P+8E), 16 threads, 16 GB RAM | TBD seconds |
+
+  4NEC2 defaults; Windows power mode: Best performance.
 
 """
         fournec2 = """
