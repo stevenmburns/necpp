@@ -54,5 +54,3 @@ Relative to `tmolteno/necpp`:
 
 These changes do not alter the license: the modified work as a whole remains
 under GPL-2.0-or-later, and the original copyright notices are retained.
-
-Modifications Copyright (C) 2026 Steven Burns, distributed under GPL-2.0-or-later.
